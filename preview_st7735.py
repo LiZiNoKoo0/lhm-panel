@@ -133,6 +133,32 @@ def render(line, fg_word, bg_word, x=2, y=None):
     return rows
 
 
+#: Where the live firmware puts its two rows (firmware/main.rs TOP_Y/BOTTOM_Y).
+LINE_YS = (20, 44)
+
+
+def render_page(lines, fg_word, bg_word, ys=LINE_YS):
+    """Several centred rows in one frame -- the layout the live firmware draws.
+
+    Mirrors draw_row() in firmware/st7735-text/src/main.rs: each line is
+    truncated to COLS characters and centred, so the PC and the glass agree
+    without either side knowing what the text means.
+    """
+    rows = [[bg_word] * PANEL_W for _ in range(PANEL_H)]
+    for text, y in zip(lines, ys):
+        fitted = prepare_text(text)
+        width = len(fitted) * font.CELL_W
+        x = (PANEL_W - width) // 2 if width < PANEL_W else 0
+        for row, start, length in ink_runs(fitted):
+            py = y + row
+            if not (0 <= py < PANEL_H):
+                continue
+            for px in range(x + start, x + start + length):
+                if 0 <= px < PANEL_W:
+                    rows[py][px] = fg_word
+    return rows
+
+
 def to_bytes(rows, big_endian=True):
     """RGB565 words -> the byte stream SPI expects."""
     out = bytearray()

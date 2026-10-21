@@ -3,25 +3,10 @@
 version = 4
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "basic-toml"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "bitfield"
@@ -516,30 +501,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp-metadata"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6fbc1d166be84c0750f121e95c8989ddebd7e7bdd86af3594a6cfb34f039650"
-dependencies = [
- "anyhow",
- "basic-toml",
- "indexmap",
- "proc-macro2",
- "quote",
- "serde",
- "strum",
-]
-
-[[package]]
-name = "esp-metadata-generated"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "189d36b8c8a752bdebec67fd02a15ebb1432feea345553749bca7ce2393cc795"
-dependencies = [
- "esp-metadata",
-]
-
-[[package]]
 name = "esp-metadata-generated"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -550,19 +511,6 @@ name = "esp-metadata-generated"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "911aadae41ec99104efa865bd0b6e486b4b735999f9b571963748a46d16495ab"
-
-[[package]]
-name = "esp-println"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e7e3ab41e96093d7fd307e93bfc88bd646a8ff23036ebf809e116b18869f719"
-dependencies = [
- "critical-section",
- "document-features",
- "esp-metadata-generated 0.1.0",
- "log",
- "portable-atomic",
-]
 
 [[package]]
 name = "esp-riscv-rt"
@@ -789,8 +737,6 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -1135,7 +1081,6 @@ version = "0.1.0"
 dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
- "esp-println",
 ]
 
 [[package]]

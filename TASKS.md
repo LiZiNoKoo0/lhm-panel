@@ -278,11 +278,16 @@ python term_tk.py
 2. `pcmon/font8x16.py` —— 95 个可打印字符的字模表（第 32–126 号），每字 16 字节，最高位=最左像素，1=墨
 3. `tools/font8x16_gen.py` —— 字模生成器（GDI 抠 1 位点阵），`--c FILE` 直接导出固件用的 C 头文件
    （`--rust FILE` 直接导出固件用的 Rust 字模表）
-4. `firmware/st7735-text/` —— 真固件：手写 ST7735 SPI 驱动 + `src/font8x16.rs`，
-   在 RAM 里拼出整帧 160×80（正好 25600 字节），先把 CRC32 打到串口，再把帧推上屏
+4. `firmware/st7735-text/` —— 真固件（**哑终端**）：手写 ST7735 SPI 驱动 + `src/font8x16.rs`，
+   UART0 收一行 `<上排>|<下排>`，在 RAM 里拼出整帧 160×80（正好 25600 字节），
+   先把这帧的 CRC32 打到串口，再把同一份字节推上屏
 5. `firmware/check_parity.py` —— 用预览渲出同一帧、算同一个 CRC32，和板子报的比
 6. `firmware/flash.ps1` —— 一条命令编译+烧录
-7. `pcmon/serialport.py` —— ctypes 写的只读串口（不装 pyserial）
+7. `pcmon/serialport.py` —— ctypes 写的串口（读+写，不装 pyserial）
+8. `live_serial.py` / `live.bat` —— 把**真实** CPU 占用率和温度每秒推到屏上（`pcmon/lhm.py` 供数）
+
+固件不认识 "CPU" 这两个字：它只画收到的字节，排版（标签、右对齐、`--`）全在 PC 上。
+这条分工和 M6 的 daemon 排版、终端零语义是同一条规矩，只是先跑在串口上。
 
 ### 为什么字模要自己抠
 
@@ -303,12 +308,17 @@ python preview_st7735.py --text "CPU 33.5% 34C" --raw out.bin --no-window
 3. 非 ASCII 变 `?`，不允许出现字模表里没有的字形
 4. 颜色要按 RGB565 量化后再显示；量化后跟你要的不一样时必须**明说**（例：`#010101` 会变成黑）
 5. 固件侧：`python tools/font8x16_gen.py --c font8x16.h` 出来的表，与预览用的表逐字节相同
-6. 烧进去之后 **`PARITY OK`**：板子报的 CRC32 必须等于预览 `--raw` 那份字节的 CRC32
+6. 烧进去之后 **`PARITY OK`**：板子报的 CRC32 必须等于预览渲出的那份字节的 CRC32
+7. 接上实时数据：`live_serial.py` 每帧都打 `ok`，数字要和任务管理器对得上
 
 ```
 powershell -ExecutionPolicy Bypass -File firmware\flash.ps1          # 编译 + 烧录（COM10）
 python firmware\check_parity.py --port COM10                         # 比对像素，期望 PARITY OK
+python live_serial.py --source demo                                  # 不装 LHM 也能试
+live.bat                                                             # 真 CPU 占用 / 温度，1 Hz
 ```
+
+屏幕上一共两行：`CPU  33.5%` / `TEMP   34C`。没有数据就是 `--`，绝不显示上一次的旧值。
 
 ### 串口复位这块的坑（下次别重踩）
 
@@ -316,8 +326,9 @@ python firmware\check_parity.py --port COM10                         # 比对像
   **DTR 必须保持不置位**，否则 IO0 被拉低，芯片直接进 ROM 下载模式，串口一个字都不出（看起来像"板子没烧进去"）。
 - `DCB.fDtrControl` / `fRtsControl` 必须是 ENABLE(1)，否则驱动会覆盖线状态，
   `EscapeCommFunction` 调了也白调。
-- 这块 CH343 的 EN 脉冲大约三成会被吞掉（应用只在启动那一刻打印一次，脉冲失败就等于"没有任何输出"），
-  所以 `pcmon/serialport.py` 里是**重试式**复位：最多 4 次，每次等 2.5 秒。
+- 这块 CH343 的 EN 脉冲大约三成会被吞掉，所以 `pcmon/serialport.py` 里是**重试式**复位：最多 4 次，每次等 2.5 秒。
+- 更省事的结论：**实时画面根本不需要复位**。固件是被动渲染的，PC 打开串口直接发帧就行；
+  `--reset` 只是用来看启动横幅（boot banner）。别为了"让它刷新"去反复拉 EN。
 
 ### 禁止
 

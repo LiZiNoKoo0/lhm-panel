@@ -126,6 +126,20 @@ class Port(object):
             return b""
         return buf.raw[:got.value]
 
+    def write(self, data):
+        """Blocking write; returns bytes accepted (0 on any failure)."""
+        if not data:
+            return 0
+        buf = ctypes.create_string_buffer(bytes(data), len(data))
+        sent = wt.DWORD(0)
+        if not k32.WriteFile(self.handle, buf, len(data), ctypes.byref(sent), None):
+            return 0
+        return sent.value
+
+    def write_line(self, text):
+        """One ASCII line, '\n' terminated -- the firmware's frame format."""
+        return self.write(text.encode("ascii", "replace") + b"\n")
+
     def close(self):
         if getattr(self, "handle", None) and self.handle != INVALID_HANDLE_VALUE:
             k32.CloseHandle(self.handle)

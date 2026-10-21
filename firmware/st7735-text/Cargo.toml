@@ -8,7 +8,6 @@ edition = "2021"
 # wants esp-sync 0.3, which needs a nightly feature the 'esp' toolchain lacks.
 esp-hal = { version = "=1.1.2", features = ["esp32", "unstable"] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
-esp-println = { version = "0.15.0", features = ["esp32"] }
 
 [profile.release]
 opt-level = "s"
