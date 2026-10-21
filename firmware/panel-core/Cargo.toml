@@ -1,0 +1,12 @@
+[package]
+name = "panel-core"
+version = "0.1.0"
+edition = "2021"
+description = "Board-independent core of the 160x80 text panel: canvas, glyphs, scenes, CRC, link contract. No HAL, no I/O, no allocation."
+
+[lib]
+name = "panel_core"
+
+[dependencies]
+# Deliberately empty. If this crate ever needs a dependency, something above it
+# has leaked downwards. See firmware/SPEC.md C-1/C-3.

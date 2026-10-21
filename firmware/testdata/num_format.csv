@@ -1,0 +1,29 @@
+# num_format.csv -- golden vectors for SPEC.md D-21..D-29
+# Both sides MUST pass this file: firmware (format.rs) and the PC preview.
+# Columns: value,dec,unit,expected
+#   value: a decimal number, or the literal `null`
+#   dec:   number of decimals (0..3)
+#   unit:  literal string appended with no space (may be empty)
+#   expected: exact characters to draw; `--` means "no value"
+# Rules exercised: rounding half away from zero, no negative zero,
+#   dot as decimal separator, no thousands separator, no clamping to min/max.
+null,1,%,--
+null,0,,--
+33.456,1,%,33.5%
+33.44,1,%,33.4%
+33.45,1,%,33.5%
+-33.45,1,%,-33.5%
+-0.04,1,C,0.0C
+-0.4,0,C,0C
+7.5,0,,8
+-7.5,0,,-8
+0.5,0,,1
+0.4,0,,0
+12,2,,12.00
+999.95,1,,1000.0
+100,0,%,100%
+0,0,%,0%
+150,0,%,150%
+-5,0,C,-5C
+33.333333,3,,33.333
+33.333333,9,,33.333

@@ -1,0 +1,21 @@
+Read PROTOCOL.md, TASKS.md (task M5), README.md and the existing pcmon/protocol.py and fake_daemon.py. Implement ONLY task M5.
+
+Deliverables:
+1. NEW FILE pcmon/lhm.py - a LhmSource class that spawns the LibreHardwareMonitor bridge (a console program at H:\tools\lhm\lhm_bridge.exe) with a stdout pipe, reads one NDJSON array per line in a background thread, keeps only the newest frame plus its arrival time, and exposes snapshot(now) -> {metric_id: value or None}. Details are in TASKS.md M5.
+   - The bridge prints one JSON ARRAY per line; invalid sensors are simply absent from the array.
+   - No new frame for 3 seconds => every metric is None. Bridge process exit => every metric None, then respawn with the 1/2/4/8/10 s backoff ladder.
+   - Nothing may block on the pipe. Swallow and count errors.
+2. EDIT fake_daemon.py ONLY to add --source fake|lhm (default fake, existing behaviour byte-identical) and --bridge PATH (default H:\tools\lhm\lhm_bridge.exe). In lhm mode the catalog lists only metrics that actually resolved, and data frames carry null for metrics that are missing or stale this round. Do not restructure the file, do not change the layouts, the send loop, the recording format or the protocol encoding.
+3. Do not modify PROTOCOL.md, README.md, TASKS.md, pcmon/protocol.py, term_tk.py, replay.py, run.bat, run-dsh.ps1, tools/, tasks-inbox/ or recordings/.
+
+Sensor mapping is a table in TASKS.md M5. Match on hwtype + name, never on the path string (multiple GPUs and network cards would collide). B/s to KB/s for net.down.
+
+HOW TO TEST ON THIS HOST:
+- The bridge really works; run it yourself first (H:\tools\lhm\lhm_bridge.exe, cwd must be H:\tools\lhm) and look at a line so you know the shape.
+- 7802 is usually occupied by the user's own daemon: always test on ports 7850-7860.
+- Do NOT use Start-Process (this host throws a modal error dialog). Use subprocess.Popen with stdout/stderr to files.
+- The bridge needs no admin for load/memory/network/storage; CPU temperature may be absent without admin. Your tests must PASS with whatever sensors exist, and must SKIP (not fail) temperature-specific assertions when no Temperature sensor is present. Print which metrics resolved.
+- Verify: (a) lhm mode serves a catalog containing cpu.total and mem.used with plausible values; (b) a data frame carries a number for each resolved metric; (c) kill the bridge -> within ~3.5 s the next data frame carries null for every metric; (d) restart the bridge -> values return without restarting the daemon; (e) fake mode is unchanged (run your own client and compare frame types with a pre-change recording if useful); (f) python -m pcmon.protocol still prints ALL OK; (g) python term_tk.py --selftest --port 7861 still passes 22 checks and python replay.py --selftest still passes.
+- Kill every process you start, delete your own temp files, and leave no process on ports 7850-7860.
+
+Report at the end: what resolved, what you skipped and why, and the exact numbers you saw.

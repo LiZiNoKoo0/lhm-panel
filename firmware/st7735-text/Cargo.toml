@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Board-independent core: canvas, glyphs, scenes, CRC, link contract.
+# Everything in it must build and test on a PC (firmware/SPEC.md C-2).
+panel-core = { path = "../panel-core" }
+
 # Pinned to the versions the working st7735-esp32 project already uses: 1.2.x
 # wants esp-sync 0.3, which needs a nightly feature the 'esp' toolchain lacks.
 esp-hal = { version = "=1.1.2", features = ["esp32", "unstable"] }
