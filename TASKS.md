@@ -277,6 +277,12 @@ python term_tk.py
 1. `preview_st7735.py` —— 声明 160×80，用 8×16 点阵渲染出**真实 framebuffer**，窗口放大显示（默认 4 倍），1/2/4/6/8 切换，`s` 存盘，`q`/Esc 退出
 2. `pcmon/font8x16.py` —— 95 个可打印字符的字模表（第 32–126 号），每字 16 字节，最高位=最左像素，1=墨
 3. `tools/font8x16_gen.py` —— 字模生成器（GDI 抠 1 位点阵），`--c FILE` 直接导出固件用的 C 头文件
+   （`--rust FILE` 直接导出固件用的 Rust 字模表）
+4. `firmware/st7735-text/` —— 真固件：手写 ST7735 SPI 驱动 + `src/font8x16.rs`，
+   在 RAM 里拼出整帧 160×80（正好 25600 字节），先把 CRC32 打到串口，再把帧推上屏
+5. `firmware/check_parity.py` —— 用预览渲出同一帧、算同一个 CRC32，和板子报的比
+6. `firmware/flash.ps1` —— 一条命令编译+烧录
+7. `pcmon/serialport.py` —— ctypes 写的只读串口（不装 pyserial）
 
 ### 为什么字模要自己抠
 
@@ -297,6 +303,21 @@ python preview_st7735.py --text "CPU 33.5% 34C" --raw out.bin --no-window
 3. 非 ASCII 变 `?`，不允许出现字模表里没有的字形
 4. 颜色要按 RGB565 量化后再显示；量化后跟你要的不一样时必须**明说**（例：`#010101` 会变成黑）
 5. 固件侧：`python tools/font8x16_gen.py --c font8x16.h` 出来的表，与预览用的表逐字节相同
+6. 烧进去之后 **`PARITY OK`**：板子报的 CRC32 必须等于预览 `--raw` 那份字节的 CRC32
+
+```
+powershell -ExecutionPolicy Bypass -File firmware\flash.ps1          # 编译 + 烧录（COM10）
+python firmware\check_parity.py --port COM10                         # 比对像素，期望 PARITY OK
+```
+
+### 串口复位这块的坑（下次别重踩）
+
+- 板上 **DTR 接 IO0、RTS 接 EN**，而且是反相电路。复位时只能脉冲 RTS，
+  **DTR 必须保持不置位**，否则 IO0 被拉低，芯片直接进 ROM 下载模式，串口一个字都不出（看起来像"板子没烧进去"）。
+- `DCB.fDtrControl` / `fRtsControl` 必须是 ENABLE(1)，否则驱动会覆盖线状态，
+  `EscapeCommFunction` 调了也白调。
+- 这块 CH343 的 EN 脉冲大约三成会被吞掉（应用只在启动那一刻打印一次，脉冲失败就等于"没有任何输出"），
+  所以 `pcmon/serialport.py` 里是**重试式**复位：最多 4 次，每次等 2.5 秒。
 
 ### 禁止
 

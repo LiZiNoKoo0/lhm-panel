@@ -11,6 +11,9 @@ tmp/
 daemon.token
 .daemon-token
 
+# ---- Rust firmware build artifacts ----
+firmware/*/target/
+
 # ---- recorded sessions: keep the sample fixture, ignore new captures ----
 recordings/*.ndjson
 !recordings/session1.ndjson
