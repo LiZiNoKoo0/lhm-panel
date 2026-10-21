@@ -23,10 +23,13 @@
 //!   panel.rs    the ST7735 alone
 //!   link.rs     bytes -> lines
 //!   diag.rs     banner + per-frame CRC line
+//!   sys.rs      heap + millisecond clock
 //!   board.rs    pins and measured panel parameters
 
 #![no_std]
 #![no_main]
+
+extern crate alloc;
 
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Level, Output, OutputConfig};
@@ -44,6 +47,7 @@ mod board;
 mod diag;
 mod link;
 mod panel;
+mod sys;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -62,6 +66,9 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());
+    // The allocator comes up before anything else allocates, and before the
+    // banner, because the banner is where its state is reported.
+    sys::init_heap();
     let mut delay = Delay::new();
 
     // UART first: the banner before the panel is part of the boot contract.
@@ -71,6 +78,15 @@ fn main() -> ! {
         .with_rx(peripherals.GPIO3);
     let mut transport = link::UartLine::new(uart);
     diag::banner(&mut transport);
+
+    // One line, two capabilities. The probe is released right after so the
+    // heap the later cards budget against is the full 64 KB again.
+    let probe = sys::probe();
+    diag::heap_clock(&mut transport, probe.size, probe.free, sys::now_ms());
+    if !probe.verified {
+        diag::heap_unverified(&mut transport);
+    }
+    drop(probe);
 
     let mut backlight = Output::new(peripherals.GPIO2, Level::High, OutputConfig::default());
     backlight.set_high();

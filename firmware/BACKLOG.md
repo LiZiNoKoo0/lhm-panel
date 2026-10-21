@@ -13,7 +13,7 @@
 | 卡 | 目标 | 状态 |
 |---|---|---|
 | T1 | 依赖通关（只加依赖，不写业务） | DONE |
-| T2 | 堆 + 时钟（systimer 毫秒）+ heap 自检 | TODO |
+| T2 | 堆 + 时钟（毫秒）+ heap 自检 | DONE |
 | T3 | AP 配网网页 + 凭据落盘 | TODO |
 | T4 | sector store A/B（掉电可回退） | TODO |
 | T5 | TCP 链路 + `hello` + 断线退避 | TODO |
@@ -123,12 +123,46 @@ ELF 从 1 871 296 → 1 872 104 字节（+808，未被引用的依赖被 LTO 丢
 
 **目标**：allocator 起来、毫秒时钟可用，并把这两个能力用一行日志证明。
 
-- 用 `esp-alloc` 建一个静态堆（建议 64KB，SPEC §5 预算）
-- 单调毫秒：systimer 读数，**上电从 0 开始**
-- 启动横幅**追加一行**：`heap: 65536 free=NNNNN  clock: 0ms`
+- 用 `esp-alloc` 建一个静态堆（64KB）
+- 单调毫秒：**上电从 0 开始**、≥1kHz 精度（SPEC §3.4）
+- 启动横幅**追加一行**：`heap: 65536 free=NNNNN  clock: NNNNms`
 - 验收：`cargo test` 全绿；横幅多出这一行且数值合理；`PARITY OK` 仍成立
 
 > 注意：这一卡**允许**改横幅（新增一行，不改已有行的内容）。改的同时更新 `panel-core/tests/diag_format.rs`。
+
+### 结果（验收通过）
+
+新增 `st7735-text/src/sys.rs`（`init_heap` / `probe` / `now_ms`），`diag.rs` 加 `heap_clock`，
+`main.rs` 里三行装配，`diag_format.rs` 加 2 条测试。板上实测横幅：
+
+```
+=== st7735 160x80 live text / 8x16 dot matrix ===
+heap: 65536 free=64512  clock: 5ms
+init done: MADCTL=0x60 OFF=(0,24) INVERT=false SPI=20MHz
+READY
+```
+
+`free=64512` 是**故意的**：自检分配的 1KB 在打印时仍被持有（`drop(probe)` 在打印之后），
+所以这个数只有在 allocator 真的切出一块内存时才会小于 65536。若 `free == size`，说明探针没跑，
+不是“堆很健康”。探针还会把 1024 字节写成 `i ^ 0x5A` 再读回来，不一致就多打一行
+`heap: probe readback mismatch`（正常启动永不出现）。
+
+**与任务卡不一致的两处，均已写进 SPEC §3.4：**
+
+1. **时钟源不是 systimer。** ESP32（经典）上 esp-hal 的 `time::Instant::now()` 读的是
+   **TIMG0 LACT**（16MHz，`rt` 启动时配好）；systimer 时间源是 S3/C 系列的做法。
+   卡上写 systimer 是按 S3 的印象写的，本板按芯片走，不额外自开 systimer 去“对齐文档”。
+2. **`clock:` 不是 0ms，是 5ms。** 计数原点确实是上电（`main` 第一行会是 0），
+   但横幅是在 `esp_hal::init()` + UART 配置之后才打的，这中间已经过了约 5ms。
+   为了让横幅上的数字有意义，**不做减去偏移的“美化”**。
+
+时钟“真的在走”是单独验证过的：临时在 300ms `delay` 后再打一行读数，
+得到 `clock: 308ms`（相对 5ms 差 303ms），随后撤掉该临时行、重编、重烧，
+最终固件只有一行 `heap:`。
+
+验收记录：`cargo build --release` **0 warning**；`panel-core` **16/16** 绿；
+ELF 1 872 104 → 1 999 092 字节（+127KB，alloc + 堆管理进来了，属预期）；
+`check_parity.py` 仍 `PARITY OK (crc=0xEE473F67)`。
 
 ---
 

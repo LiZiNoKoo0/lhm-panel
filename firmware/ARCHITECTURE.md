@@ -103,12 +103,13 @@ graph TB
 | `scene` | `panel-core/src/scene.rs`（`Rows`） | 同 | `Tree`（节点树）+ `Local`（兜底页） |
 | `link` | `panel-core/src/link.rs`（trait + 退避）/ `st7735-text/src/link.rs`（`UartLine`） | 加 `TcpLink` | 同 + 重连 FSM |
 | `diag` | `st7735-text/src/diag.rs` | 同 | 加 `stat` |
+| `sys` | `st7735-text/src/sys.rs`（堆 + 毫秒时钟） | 同 | 同 |
 | `store` | — | `store_flash` + A/B 扇区 | 同 |
 | `proto` | — | — | `panel-core/src/proto/` |
 
-> 阶段1 的验收不是口头承诺：`panel-core` 在 PC 上 `cargo test` 跑 **14 个测试**，
+> 阶段1 的验收不是口头承诺：`panel-core` 在 PC 上 `cargo test` 跑 **16 个测试**，
 > 其中 8 条是**逐字节 CRC 向量**（期望值由 `preview_st7735.py` 算出），
-> 4 条把启动横幅与 `FRAME` 行的文本钉死。硬件侧只需把字节搬到玻璃上。
+> 6 条把启动横幅（含阶段2 新增的 `heap:` 行）与 `FRAME` 行的文本钉死。硬件侧只需把字节搬到玻璃上。
 
 > 阶段1（重构）**不改变任何行为**：串口线格式、CRC、屏上画面必须逐字节不变，`check_parity.py` 仍 `PARITY OK`。重构没有验收对比就是重写。
 

@@ -54,6 +54,33 @@ fn ready_line_is_unchanged() {
 }
 
 #[test]
+fn heap_clock_line_reports_both_capabilities() {
+    // Pasted from the acceptance run on the bench board (T2): the free figure is
+    // 64 KB minus the 1 KB probe while it is still held.
+    assert_eq!(
+        text_of(|t| diag::heap_clock(t, 65536, 64512, 0)),
+        "heap: 65536 free=64512  clock: 0ms\n"
+    );
+    // two spaces before `clock:` on purpose: the columns line up in a log
+    assert!(!text_of(|t| diag::heap_clock(t, 65536, 64512, 0)).contains("   clock"));
+    // and the wrap case still has to fit the 64 byte line buffer
+    assert_eq!(
+        text_of(|t| diag::heap_clock(t, 65536, 1, u32::MAX)),
+        "heap: 65536 free=1  clock: 4294967295ms\n"
+    );
+}
+
+#[test]
+fn heap_failure_line_is_distinguishable() {
+    // A healthy boot never prints this, so its shape only has to be impossible
+    // to confuse with the line above.
+    assert_eq!(
+        text_of(|t| diag::heap_unverified(t)),
+        "heap: probe readback mismatch\n"
+    );
+}
+
+#[test]
 fn frame_line_is_unchanged_and_lowercase() {
     assert_eq!(
         text_of(|t| diag::frame_line(t, 160, 80, 0x0046_644B, 25600)),

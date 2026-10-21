@@ -39,6 +39,30 @@ pub fn init_done(
     let _ = t.write_all(&line[..at]);
 }
 
+/// `heap: 65536 free=64512  clock: 0ms\n`
+///
+/// One line, two claims, both falsifiable: `free` is measured while the probe
+/// allocation is still held (so it only drops if the allocator really worked),
+/// and `clock` is the millisecond counter read straight after boot.
+pub fn heap_clock(t: &mut dyn Transport, heap_bytes: usize, heap_free: usize, clock_ms: u32) {
+    let mut line = [0u8; 64];
+    let mut at = 0;
+    at += put(&mut line[at..], b"heap: ");
+    at += put_dec(&mut line[at..], heap_bytes as u32);
+    at += put(&mut line[at..], b" free=");
+    at += put_dec(&mut line[at..], heap_free as u32);
+    at += put(&mut line[at..], b"  clock: ");
+    at += put_dec(&mut line[at..], clock_ms);
+    at += put(&mut line[at..], b"ms\n");
+    let _ = t.write_all(&line[..at]);
+}
+
+/// Only ever emitted when the heap self-check failed. Never part of a healthy
+/// boot, so it cannot be mistaken for the normal line above.
+pub fn heap_unverified(t: &mut dyn Transport) {
+    let _ = t.write_all(b"heap: probe readback mismatch\n");
+}
+
 pub fn ready(t: &mut dyn Transport) {
     let _ = t.write_all(b"READY\n");
 }
