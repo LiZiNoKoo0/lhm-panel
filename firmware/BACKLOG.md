@@ -101,7 +101,21 @@ python firmware\check_parity.py --port COM10       # 必须 PARITY OK，CRC 与�
 
 验收记录：`cargo build --release` 强制重编后 **0 warning**；`panel-core` **14/14** 测试绿；
 ELF 从 1 871 296 → 1 872 104 字节（+808，未被引用的依赖被 LTO 丢掉了，说明没把 `std` 拉进来）。
-**硬件验收（烧录 + `PARITY OK`）待板子插回后补做。**
+
+**硬件验收（已补做，板子插回后）**：
+
+| 用例 | 板上 CRC | PC 预览 CRC | 结果 |
+|---|---|---|---|
+| `CPU 33.5%\|TEMP   34C` | `0xEE473F67` | `0xEE473F67` | PARITY OK |
+| `CPU 100%\|TEMP   --C` | `0xB5EE5FE9` | `0xB5EE5FE9` | PARITY OK |
+| `\|`（全黑） | `0x0448135D` | `0x0448135D` | PARITY OK |
+| `MEM 71%\|NET 1.2MB/s` | `0xFCD2CA54` | `0xFCD2CA54` | PARITY OK |
+
+另跑 `live_serial.py --source demo --once`：`CPU 50.6% TEMP 42C crc 0xFD6FD9FD ok`，1 帧 0 错。
+
+> 踩坑：`check_parity.py --reset` 只复位一次，而这块 CH343 的 RTS 脉冲约三成被吞；
+> 一旦被吞，芯片可能停在 espflash 留下的 ROM 下载模式，“固件正常”看起来像“固件死了”。
+> 已改成 **最多 4 次重试、听到启动日志才停**。
 
 ---
 

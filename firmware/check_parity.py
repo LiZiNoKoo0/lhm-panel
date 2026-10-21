@@ -31,6 +31,11 @@ FRAME_RE = r"FRAME\s+(\d+)x(\d+)"
 #: The frame the check draws if the caller does not pass --lines.
 SAMPLE = ("CPU 33.5%", "TEMP   34C")
 
+#: One RTS pulse is swallowed about one time in three on this CH343 board.
+RESET_ATTEMPTS = 4
+#: How long to listen for a boot log after each pulse before retrying.
+RESET_LISTEN_S = 1.5
+
 
 def expected_frame(lines):
     """The frame the firmware should be pushing, plus its CRC."""
@@ -89,11 +94,24 @@ def main():
     port = serialport.Port(args.port, args.baud)
     try:
         if args.reset:
-            port.reset_board()
-            deadline = time.time() + 2.0
-            while time.time() < deadline:  # swallow the boot banner
-                if not port.read():
-                    time.sleep(0.02)
+            # A swallowed RTS pulse leaves the chip in whatever state it was in
+            # -- often the ROM loader right after espflash, which answers
+            # nothing. Retry until real bytes come back, otherwise a working
+            # firmware looks dead.
+            for attempt in range(RESET_ATTEMPTS):
+                port.reset_board()
+                deadline = time.time() + RESET_LISTEN_S
+                heard = b""
+                while time.time() < deadline:  # swallow the boot banner
+                    chunk = port.read()
+                    if chunk:
+                        heard += chunk
+                    else:
+                        time.sleep(0.02)
+                if heard:
+                    break
+                print("reset attempt %d/%d: no boot log, retrying"
+                      % (attempt + 1, RESET_ATTEMPTS))
         time.sleep(0.2)
 
         port.write_line("%s|%s" % lines)
