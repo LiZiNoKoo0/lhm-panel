@@ -61,6 +61,7 @@ from pcmon import protocol
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DAEMON_SCRIPT = os.path.join(BASE_DIR, "fake_daemon.py")
+TOKEN_FILE = os.path.join(BASE_DIR, "daemon.token")
 
 DEFAULT_HOST = protocol.DEFAULT_DAEMON_HOST          # 127.0.0.1
 DEFAULT_PORT = protocol.DEFAULT_PORT                 # 7802
@@ -970,6 +971,25 @@ def _pump(app, seconds, until=None, step=SELFTEST_SETTLE_S / 8.0):
     return bool(until()) if until is not None else True
 
 
+def _press(app, keysym, until, timeout=3.0, slice_s=0.5):
+    """Generate a real Tk key event, retrying until until() holds.
+
+    Tk sometimes drops a synthetic key event on a withdrawn window, which
+    made this selftest flaky (same build, same code, pass one run and fail
+    the next). Pressing again is harmless and still exercises the real
+    binding, unlike calling the handler directly.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.root.event_generate(keysym)
+        if _pump(app, slice_s, until=until):
+            return True
+    try:
+        return bool(until())
+    except Exception:
+        return False
+
+
 def _port_open(host, port, timeout=0.3):
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
@@ -1048,6 +1068,46 @@ def _read_text(path):
         return ""
 
 
+def _glyph_boxes(canvas):
+    """Bounding boxes trimmed to the ink (ascent) part of every text item.
+
+    Tk's bbox spans ascent+descent, so two labels separated by a 1 px gap in
+    real ink still look overlapping when their blank descender rows meet.
+    Trimming to the ascent height makes the comparison honest.
+    """
+    boxes = []
+    for item in canvas.find_all():
+        if canvas.type(item) != "text":
+            continue
+        text = canvas.itemcget(item, "text")
+        if not text:
+            continue
+        box = canvas.bbox(item)
+        if not box:
+            continue
+        try:
+            font = tkfont.Font(root=canvas,
+                               font=canvas.itemcget(item, "font"))
+            ascent = font.metrics("ascent")
+        except (tk.TclError, ValueError, TypeError):
+            ascent = box[3] - box[1]
+        boxes.append((text, (box[0], box[1], box[2],
+                             min(box[3], box[1] + ascent))))
+    return boxes
+
+
+def find_text_overlaps(canvas):
+    """Return [(text_a, text_b), ...] for text whose real ink intersects."""
+    boxes = _glyph_boxes(canvas)
+    hits = []
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            a, b = boxes[i][1], boxes[j][1]
+            if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                hits.append((boxes[i][0], boxes[j][0]))
+    return hits
+
+
 def run_selftest(args):
     """Headless-ish end-to-end check. Prints PASS/FAIL lines, returns 0 or 1."""
     checks = []
@@ -1101,6 +1161,9 @@ def run_selftest(args):
         check("drawn_items", len(app.records) > 0,
               "records=%d" % len(app.records))
 
+        overlaps = find_text_overlaps(app.canvas)
+        check("no_text_overlap", not overlaps, "overlaps=%r" % (overlaps,))
+
         got_data = _pump(app, SELFTEST_UI_WAIT_S,
                          until=lambda: app.data_frames >= 2)
         check("data_frames", got_data, "data_frames=%d" % app.data_frames)
@@ -1128,10 +1191,10 @@ def run_selftest(args):
         deadline = time.monotonic() + SELFTEST_UI_WAIT_S * 2
         while len(app.focusables) < 2 and time.monotonic() < deadline:
             started_at = app.scene
-            app.root.event_generate("<n>")           # real Tk key binding
             walked += 1
-            _pump(app, 1.2, until=lambda b=started_at: (app.scene != b)
-                  and len(app.focusables) >= 2)
+            _press(app, "<n>",
+                   lambda b=started_at: (app.scene != b)
+                   and len(app.focusables) >= 2, timeout=1.5)
         check("focusables_seen", len(app.focusables) >= 2,
               "focusables=%d pages_walked=%d scene=%r"
               % (len(app.focusables), walked, app.scene))
@@ -1148,8 +1211,8 @@ def run_selftest(args):
                   "box %r -> %r" % (before_box, after_box))
             target = app.focusables[app.focus_pos]["index"]
             sent_before = len(app.sent_events)
-            app.root.event_generate("<Return>")
-            _pump(app, SELFTEST_SETTLE_S)
+            _press(app, "<Return>",
+                   lambda: len(app.sent_events) > sent_before)
             emitted = len(app.sent_events) > sent_before
             last = app.sent_events[-1] if app.sent_events else None
             check("focus_event_sent", emitted and last == {"t": "event", "k": "key",
@@ -1160,9 +1223,7 @@ def run_selftest(args):
             check("focus_event_sent", False, "no focusable nodes on any page")
 
         scene_before = app.scene
-        app.root.event_generate("<n>")
-        switched = _pump(app, SELFTEST_UI_WAIT_S,
-                         until=lambda: app.scene != scene_before)
+        switched = _press(app, "<n>", lambda: app.scene != scene_before)
         check("page_switch", switched,
               "scene %r -> %r" % (scene_before, app.scene))
 
@@ -1214,14 +1275,20 @@ def run_selftest(args):
             check("daemon_saw_focus_event", bool(focus_lines),
                   "daemon log focus lines=%r" % (focus_lines[-3:],))
     finally:
-        if app is not None:
-            app.close()
-        elif root is not None:
-            try:
-                root.destroy()
-            except tk.TclError:
-                pass
-        _stop_process(proc)
+        # The daemon must die even if closing the UI raises (a leaking child
+        # keeps the port bound and poisons the next selftest run).
+        try:
+            if app is not None:
+                app.close()
+            elif root is not None:
+                try:
+                    root.destroy()
+                except tk.TclError:
+                    pass
+        except Exception:
+            pass
+        finally:
+            _stop_process(proc)
         for path in (out_path, err_path):
             try:
                 if path and os.path.isfile(path):
@@ -1263,8 +1330,25 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def read_token_file():
+    """Pick up the token fake_daemon.py publishes next to the scripts.
+
+    The daemon draws a fresh random token every run (PROTOCOL.md s.2), so
+    hand-copying it out of the banner to start a terminal is pointless in
+    development. An explicit --token always wins; --lenient daemons accept
+    anything anyway.
+    """
+    try:
+        with open(TOKEN_FILE, "r", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if not args.selftest and not args.token:
+        args.token = read_token_file()
     if args.selftest:
         return run_selftest(args)
     root = tk.Tk()

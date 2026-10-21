@@ -76,6 +76,7 @@ UI_VER = 1                                    # bump when a layout changes
 CATALOG_VER = 1                               # bump when METRICS changes
 BG_COLOR = "#F7F7F7"
 TOKEN_BYTES = 8
+TOKEN_FILE = "daemon.token"          # written next to this script for term_tk.py
 EXAMPLE_CLIENT_ID = "sample-thin"
 
 #: Fake signal shaping (only used to invent numbers).
@@ -1065,11 +1066,29 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def write_token_file(token_text):
+    """Publish the token next to the script so term_tk.py can find it.
+
+    A terminal has to authenticate (PROTOCOL.md s.2) and the token is random
+    per run, so hand-copying it from the banner is a pointless papercut in
+    development. Failure here is not fatal: the banner still prints it.
+    """
+    try:
+        path = Path(__file__).resolve().parent / TOKEN_FILE
+        path.write_text(token_text + "\n", encoding="ascii")
+        return path
+    except OSError:
+        return None
+
+
 def main(argv=None):
     args = parse_args(argv)
     daemon = Daemon(host=args.host, port=args.port, token=args.token,
                     record_path=args.record, lenient=args.lenient, seed=args.seed)
     daemon.banner()
+    written = write_token_file(daemon.token)
+    if written is not None:
+        daemon.log("token file: " + str(written))
     started = False
     try:
         started = daemon.serve_forever()

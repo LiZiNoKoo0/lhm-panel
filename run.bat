@@ -24,7 +24,7 @@ echo   Window 1 = fake daemon (fake data, lenient token)
 echo   Window 2 = terminal  (keys: n/p page, arrows focus, Enter select)
 echo.
 
-start "PC-Monitor Daemon" cmd /k "%PY%" fake_daemon.py --lenient
+start "PC-Monitor Daemon" cmd /k "%PY%" fake_daemon.py
 ping -n 3 127.0.0.1 >nul
 start "PC-Monitor Terminal" cmd /k "%PY%" term_tk.py
 
