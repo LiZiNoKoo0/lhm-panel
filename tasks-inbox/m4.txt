@@ -1,0 +1,24 @@
+Read PROTOCOL.md, README.md, TASKS.md and the finished pcmon/protocol.py, fake_daemon.py, term_tk.py. Implement ONLY task M4: create replay.py at the repository root - an offline replayer that feeds a recorded NDJSON session to a terminal.
+
+Follow TASKS.md M4 exactly:
+- usage: python replay.py recordings/session1.ndjson [--port N] [--speed F] [--loop] [--once]
+- listen on TCP 0.0.0.0:7802 by default (make the port a flag), accept a terminal connection, then replay the recorded outbound frames in order and at the recorded relative timing divided by --speed
+- the recording is what fake_daemon.py wrote with --record: one JSON frame per line, in send order. Records carry an "s" sequence field; preserve frames verbatim and do not re-encode or reorder them
+- a terminal still sends hello/ping; replay must tolerate that (it is not a real daemon): read and discard terminal input without ever blocking the replay, answer ping with pong, and accept any token. Say so in the file docstring and in the startup banner - a replay is not an authentication boundary
+- --loop restarts from the first frame when the recording ends, waiting for a new connection each cycle; without it, replay once, tell the terminal the session ended (a cmd frame with action "clear" plus a debug frame is enough), and exit
+- --once means: serve exactly one terminal, then exit
+- handle a terminal that disconnects mid-replay without crashing; write nothing to disk
+
+Python 3.12 stdlib only, pure ASCII source, no third-party packages. Use pcmon.protocol for encode and for classifying frames.
+
+VERIFY IT YOURSELF, all of this:
+1. recordings/session1.ndjson already exists; use it. Write a throwaway client under tmp/ that connects, sends a hello, and records every frame it receives.
+2. Replay it into that client at --speed 8 (so the test is fast) and assert the received frame types and their order match the recording's frame types and order exactly, and that payloads are byte-identical apart from nothing (compare the decoded dicts).
+3. Replay it into the real term_tk.py: run `python term_tk.py --port <replay port>` is not automatable headlessly, so instead spawn term_tk with --selftest --no-spawn --port <replay port> ... if that does not work, connect your recording client instead and assert the same frame sequence a second time. Do not leave any window open and do not use Start-Process (this host throws a modal error dialog).
+4. Assert the timing: with --speed 1 the gaps should be within about 15 percent of the recorded gaps; with --speed 8 they should be about 8 times shorter. Use a short slice of the recording so the test stays under a minute.
+5. Assert --loop works: connect, let it wrap once, confirm frames restart from the beginning of the file.
+6. Kill every process you start and delete your own tmp files.
+
+PORT WARNING: 7802 is usually occupied on this machine by the user's own running daemon. Always pass --port with a free port (7840-7850) in your tests. Never kill processes you did not start.
+
+Do not start M5 or any later milestone. Do not modify PROTOCOL.md, README.md, TASKS.md, pcmon/protocol.py, fake_daemon.py, term_tk.py, run.bat, run-dsh.ps1, start-dsh.bat, tasks-inbox/ or recordings/session1.ndjson.
