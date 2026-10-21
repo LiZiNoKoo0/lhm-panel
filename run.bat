@@ -20,11 +20,20 @@ if errorlevel 1 (
 for /f "delims=" %%v in ('%PY% -c "import sys;print(sys.version.split()[0])"') do set "PYVER=%%v"
 echo Using Python %PYVER% at %PY%
 echo.
-echo   Window 1 = fake daemon (fake data, lenient token)
+rem ---- optional first arg: "lhm" serves real sensors, default is fake ----
+set "SRC="
+if /i "%~1"=="lhm" set "SRC=--source lhm"
+if /i "%~1"=="fake" set "SRC=--source fake"
+
+if defined SRC (
+  echo   Window 1 = daemon (%~1 data)
+) else (
+  echo   Window 1 = daemon (fake data; pass "lhm" for real sensors)
+)
 echo   Window 2 = terminal  (keys: n/p page, arrows focus, Enter select)
 echo.
 
-start "PC-Monitor Daemon" cmd /k "%PY%" fake_daemon.py
+start "PC-Monitor Daemon" cmd /k "%PY%" fake_daemon.py %SRC%
 ping -n 3 127.0.0.1 >nul
 start "PC-Monitor Terminal" cmd /k "%PY%" term_tk.py
 
