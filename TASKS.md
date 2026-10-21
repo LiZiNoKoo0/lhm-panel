@@ -193,6 +193,72 @@ python replay.py recordings/session1.ndjson [--speed 1.0] [--loop]
 
 ---
 
+## M5 · 真实采集 —— `pcmon/lhm.py` + `--source lhm`
+
+### 输入
+`lhm_bridge.exe`（源码在 `tools/lhm_bridge/`，说明见那里的 README）。每秒一行 NDJSON **数组**：
+
+```json
+[{"id":"/intelcpu/0/load/0","path":"Intel Xeon E3-1226 v3 / CPU Total",
+  "name":"CPU Total","hw":"Intel Xeon E3-1226 v3","hwtype":"Cpu",
+  "kind":"Load","value":37.5,"unit":"%"}, ...]
+```
+
+失效的传感器**不会出现在数组里**（不是给 null）。
+
+### 输出
+
+**`pcmon/lhm.py`** —— 一个 `LhmSource` 类，只管"把桥接的当前值拿出来"：
+
+- `start()` 起子进程（stdout 管道），后台线程逐行读，**绝不阻塞调用方**
+- 保留"最新一帧 + 它的到达时间"，不存历史
+- `snapshot(now)` → `{metric_id: value 或 None}`
+- 桥接 **3 秒**没有新帧 → 全部指标 `None`
+- 桥接进程退出 → 全部 `None`，并按协议 §1 的退避阶梯（1/2/4/8/10s）重连
+- 所有异常吞掉并计数，不许把 daemon 带崩
+
+**`fake_daemon.py`** 增加两个参数：
+
+- `--source fake|lhm`（默认 `fake`，保持现有行为不变）
+- `--bridge PATH`（默认 `H:\tools\lhm\lhm_bridge.exe`）
+
+lhm 模式下：`catalog` 只列真实可用的指标；`data` 帧里本帧拿不到或已失效的指标发 **`null`**（协议 §9：null = 显示 `--`，不是省略 key）。
+
+### 指标映射
+
+| 协议 id | 传感器（`hwtype` / `name` / `kind`） | 换算 |
+|---|---|---|
+| `cpu.total` | `Cpu` / `CPU Total` / `Load` | 原值 |
+| `cpu.temp` | `Cpu` / `CPU Package` / `Temperature`，没有就 `Core Max` | 原值 |
+| `mem.used` | `Memory` / `Total Memory` / `Load` | 原值 |
+| `net.down` | `Network` / `Download Speed` / `Throughput`（取第一块有流量的网卡） | B/s → KB/s |
+| `gpu.load` | `GpuNvidia` / `GPU Core` / `Load`（可选，没有就不进 catalog） | 原值 |
+| `gpu.temp` | `GpuNvidia` / `GPU Core` / `Temperature`（可选） | 原值 |
+
+匹配按 `hwtype` + `name` 精确匹配，**不要按 `path` 字符串匹配**（多显卡、多网卡会串）。
+
+### 验收
+
+```
+python fake_daemon.py --source lhm
+python term_tk.py
+```
+
+1. 屏幕上的 CPU 数字应随真实负载变化（打开任务管理器对照）
+2. 跑个吃满 CPU 的脚本 → `cpu.total` 明显上升，`cpu.temp` 跟着上
+3. 杀掉 `lhm_bridge.exe` → **3 秒内**数值变 `--`
+4. 桥接重启 → 自动恢复，不需要重启 daemon
+5. 拿 `recordings/` 里录的一段回放，画面与实时录制时一致（验证"采数换了但协议没变"）
+
+### 禁止
+
+- ❌ 不要在 Python 里另搞一套 WMI / 性能计数器采集（M5 只认 LHM 这一个源）
+- ❌ 不要启动 `LibreHardwareMonitor.exe`，不要碰它的 GUI 配置
+- ❌ 不要让桥接的读取阻塞 daemon 主循环或发送循环
+- ❌ 不要在 lhm 模式下伪造数值填空
+
+---
+
 ## 编码规范（四条，别省）
 
 1. **纯 ASCII 的 .py 文件**（中文注释也不要——这台机器 PowerShell 5.1 会踩 GBK/UTF-8 的坑）
