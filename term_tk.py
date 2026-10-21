@@ -905,7 +905,7 @@ class TermApp:
             self.display_w - 6, 6, text="", anchor="ne", fill=DIM_COLOR,
             font=small, tags=("overlay",))
         self.scene_item = self.canvas.create_text(
-            6, 6, text="", anchor="nw", fill=DIM_COLOR,
+            6, self.display_h - 22, text="", anchor="sw", fill=DIM_COLOR,
             font=small, tags=("overlay",))
         self.debug_item = self.canvas.create_text(
             6, self.display_h - 6, text="", anchor="sw", fill=DIM_COLOR,
