@@ -20,6 +20,7 @@
 | M4 | `replay.py`（离线回放器） | 用 M2 录的流量喂 M3，表现一致 |
 | M5 | 真采集插件 + Go/Python daemon 主体 | CPU/内存/GPU 数字和任务管理器对得上 |
 | M6 | ESP32 固件（thin 终端） | 屏上出现同样的画面 |
+| P1 | `preview_st7735.py`（ST7735 160×80 预览） | 一行 8×16 字按面板真实像素显示，可导出 RGB565 裸字节 |
 
 **先做 M1 → M2 → M3，这三步跑通，协议就算验证过了。**
 
@@ -32,6 +33,8 @@ newwork/
   pcmon/protocol.py    协议库
   fake_daemon.py       假数据 daemon
   term_tk.py           桌面模拟终端
+  preview_st7735.py    ST7735 160×80 预览（一行点阵字）
+  pcmon/font8x16.py    8×16 点阵字模（预览与固件共用同一份）
   replay.py            回放器
   recordings/          daemon 录制的 NDJSON
 ```
