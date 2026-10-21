@@ -66,6 +66,21 @@ store → 无
 
 **C-3（MUST）** `core` 里出现 `esp_hal::`、引脚号、寄存器名，视为架构违规。
 
+### 2.1 工具链与依赖事实（实测，别自己换）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| `esp-hal` | `=1.1.2` | 1.2.x 要 `esp-sync 0.3`，需 esp 工具链没有的 nightly 特性 |
+| `build-std` | `["core", "alloc"]` | 阶段2 起必须带 `alloc`，否则 `esp-alloc` 链不上。**`alloc` 是 no_std 合法子集，不是 `std`** |
+| `esp-radio` | `0.18.0`（`wifi`, `esp32`） | `esp-wifi` 是上一代名字，停在 0.15，对新 hal 不可用 |
+| `esp-rtos` | `0.3.0`（`embassy`, `esp-alloc`, `esp32`） | 三个特性必须同时开，否则 WiFi 任务起不来 |
+| `esp-alloc` | `0.10.0` | 默认特性已含 `global-allocator` |
+| `embassy-net` | `0.9.1`（`tcp`, `dhcpv4`, `dns`） | 通过 `embassy-net-driver 0.2` 接 `esp-radio` |
+| `esp-storage` | `0.9.0`（`esp32`） | 0.10.0 要 `esp-hal 1.2`，装不上 |
+| `esp-println` | `0.15.0`（`esp32`） | 不依赖 `esp-hal`，可用于 panic 输出（§7.3） |
+
+**C-4（MUST）** 上面这些版本不许自行升降。装不上时先查是不是漏了芯片 feature（`esp32`）或 `build-std` 里的 `alloc`，而不是换版本。
+
 ---
 
 ## 3. 板级实现契约（移植者看这一章）

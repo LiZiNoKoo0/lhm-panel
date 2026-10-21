@@ -6,7 +6,7 @@ runner = "espflash flash --monitor"
 rustflags = ["-C", "link-arg=-Tlinkall.x"]
 
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]
 
 [env]
 ESP_LOG = "INFO"
