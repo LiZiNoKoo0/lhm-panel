@@ -1,0 +1,23 @@
+Read PROTOCOL.md, README.md and TASKS.md in this directory, plus the finished pcmon/protocol.py and fake_daemon.py. Implement ONLY task M3: create term_tk.py at the repository root - a thin desktop simulator terminal. Python 3.12 stdlib only (tkinter is allowed), pure ASCII source, three files max (do not create a package).
+
+Follow TASKS.md M3 exactly: connect to 127.0.0.1:7802, send the hello shown there, size the window from display.w/h, four primitives (rect with fill/color/width/bind_w, path with a point string, text, num), update values in place on data frames instead of redrawing the whole canvas, rebuild on ui frames, handle cmd show/clear/reset and ignore brightness, focus navigation over focusable nodes with a highlight box and Enter emitting {"t":"event","k":"key","id":"focus","v":N}, reset focus index to 0 when it goes out of range after a new ui, and the 15 s LINK LOST marker plus the "N ms ago" label in the top right. Also send a page event when the n key is pressed, and reconnect automatically with the 1/2/4/8/10 s backoff ladder from PROTOCOL.md section 1.
+
+VISUAL STYLE - this matters as much as the protocol work:
+The user wants a plain Windows 10 light look. Nothing decorative.
+- Window and canvas background: #F7F7F7. No gradients, no rounded corners, no shadows, no transparency, no images, no emoji.
+- Text: Segoe UI, falling back to TkDefaultFont. Body text #1F1F1F, secondary/dim text #605E5C.
+- Accent (progress fills, focus highlight, active button): #0078D4. Focus highlight is a 2 px #0078D4 rectangle, nothing glowing.
+- Dividers and card borders: #E1DFDD, 1 px.
+- LINK LOST is small red #C42B1C text in the bottom right corner.
+- Flat rectangles only. Keep the window chrome default (do not call overrideredirect, do not set a custom titlebar).
+- No animation loop beyond the redraws the data frames require.
+
+ALSO: change only the color constants and per-node color values inside fake_daemon.py so the pages it lays out are light instead of dark (background #F7F7F7, text #1F1F1F, dim #605E5C, accent #0078D4, line color #0078D4, dividers #E1DFDD). Do not change any layout, node count, geometry, message flow or helper logic in that file.
+
+HOW TO TEST ON THIS HOST - read carefully:
+1. This machine pops a modal Windows error dialog if you launch GUI or python subprocesses with Start-Process. Do NOT use Start-Process. Use subprocess.Popen with stdout/stderr redirected to files, or run things in the foreground with a hard timeout.
+2. Never leave a tkinter window open. Add a --selftest flag to term_tk.py that: starts the daemon as a subprocess (or expects one already running), opens the window, pumps the Tk event loop for about 4 seconds, exercises focus movement and page switching programmatically, prints a short PASS/FAIL summary, destroys the window and exits with 0 or 1. Default running (no flag) must open the normal interactive window.
+3. Run --selftest and make it pass. Also verify by connecting to a real daemon started with fake_daemon.py on port 7802 and confirming the selftest sees data frames arriving.
+4. Kill every process you start. Clean up your own temp files.
+
+Do not start M4 or any later milestone. Do not modify PROTOCOL.md, README.md, TASKS.md, pcmon/protocol.py, or anything under run-dsh.ps1, run-m1.*, start-dsh.bat, tasks-inbox/ or the logs.

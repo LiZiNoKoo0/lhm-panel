@@ -1,0 +1,12 @@
+Read PROTOCOL.md, README.md and TASKS.md in this directory, plus the already-finished pcmon/protocol.py. Implement ONLY task M2: create fake_daemon.py at the repository root. Reuse pcmon.protocol for all encoding/decoding and fit_nodes. Python 3.12 stdlib only, pure ASCII source, no third-party packages.
+
+Follow TASKS.md M2 exactly, including: TCP on 0.0.0.0:7802, one thread per connection, per-send 200 ms timeout, latest-frame-only send queue, --record writing outbound NDJSON, three UI pages laid out server-side for 240x320 and cut down with fit_nodes, hello handling that unconditionally resends catalog + scenes + ui + data, page events, FOCUS key events, ping/pong, and kicking the old connection when the same client_id reconnects. Never use one global lock to serialize sends.
+
+Then verify it yourself:
+1. Start it with the Python at C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe (use --record recordings/session1.ndjson).
+2. Write a temporary client script under tmp/ that connects, sends a hello, and asserts it receives catalog, scenes, ui and data within 3 seconds; sends a page event and asserts a new ui arrives; sends a focus key event; sends ping and asserts pong.
+3. Start a second client that sends hello with a different client_id and then stops reading entirely, and assert the first client still receives data frames.
+4. Reconnect with the same client_id and assert the old connection is closed.
+5. Kill the daemon and all test clients when done. Delete nothing except your own tmp files.
+
+Do not start M3 or any later milestone. Do not modify PROTOCOL.md, README.md, TASKS.md or pcmon/protocol.py. Do not touch run-dsh.ps1, run-m1.ps1, run-m1.bat, start-dsh.bat, dsh-web.log or m1.log. Note: TASKS.md mentions telnet, but do not rely on telnet being installed - use your own Python client instead.
