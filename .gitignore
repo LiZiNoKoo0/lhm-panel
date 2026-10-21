@@ -1,0 +1,22 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- runtime output ----
+*.log
+tmp/
+daemon.token
+.daemon-token
+
+# ---- recorded sessions: keep the sample fixture, ignore new captures ----
+recordings/*.ndjson
+!recordings/session1.ndjson
+
+# ---- OS / editor noise ----
+Thumbs.db
+desktop.ini
+*.swp
+.DS_Store
