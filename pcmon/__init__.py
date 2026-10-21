@@ -1,3 +1,3 @@
-"""pcmon -- PC-Monitor daemon package (protocol layer only for now)."""
+"""pcmon -- PC-Monitor daemon package (wire protocol + real sensor intake)."""
 
-__all__ = ["protocol"]
+__all__ = ["protocol", "lhm"]

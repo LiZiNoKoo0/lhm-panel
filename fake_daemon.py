@@ -1,15 +1,26 @@
-"""fake_daemon -- synthetic PC-Monitor daemon (milestone M2).
+"""fake_daemon -- PC-Monitor daemon (milestones M2 + M5).
 
     python fake_daemon.py [--record recordings/session1.ndjson]
+                          [--source fake|lhm] [--bridge PATH]
 
 It speaks PROTOCOL.md v0.4 over TCP/NDJSON (default 0.0.0.0:7802) to any
-number of display terminals at once and pushes invented CPU / memory / network
-numbers at 1 Hz. Every byte it encodes or decodes goes through pcmon.protocol,
-and every layout goes through pcmon.protocol.fit_nodes, so this file contains
-no protocol knowledge of its own beyond the layouts it authors.
+number of display terminals at once and pushes CPU / memory / network numbers
+at 1 Hz. Every byte it encodes or decodes goes through pcmon.protocol, and every
+layout goes through pcmon.protocol.fit_nodes, so this file contains no protocol
+knowledge of its own beyond the layouts it authors.
+
+Two value sources, and the protocol does not care which one is in use:
+  --source fake   (default) sine/sawtooth/spike generators, no real data
+  --source lhm    real LibreHardwareMonitor sensors via lhm_bridge.exe (M5,
+                  see pcmon/lhm.py). The catalog then lists only metrics that
+                  actually resolved, and every data frame carries null for the
+                  metrics that are missing or stale this round (s.9: null means
+                  "show --", never omit the key -- that would keep the old one).
 
 What this file deliberately does NOT do:
-  * collect any real system data -- CPU/RAM/NET are invented (M5 does reality)
+  * collect sensors -- pcmon/lhm.py owns the bridge subprocess, this file only
+    asks it for a snapshot (and never blocks on its pipe)
+  * invent numbers in lhm mode -- a missing sensor stays null (TASKS.md M5)
   * accept commands from terminals -- terminals only report events (s.5)
   * keep value history for sparklines -- the terminal owns that ring buffer
     (s.8); we only ever send the newest value
@@ -44,6 +55,7 @@ import threading
 import time
 from pathlib import Path
 
+from pcmon import lhm
 from pcmon import protocol
 
 # ---------------------------------------------------------------------------
@@ -78,6 +90,14 @@ BG_COLOR = "#F7F7F7"
 TOKEN_BYTES = 8
 TOKEN_FILE = "daemon.token"          # written next to this script for term_tk.py
 EXAMPLE_CLIENT_ID = "sample-thin"
+
+#: Value sources (M2 invented numbers / M5 real sensors).
+SOURCE_FAKE = "fake"
+SOURCE_LHM = "lhm"
+SOURCES = (SOURCE_FAKE, SOURCE_LHM)
+
+#: Where the LHM console bridge lives by default (see tools/lhm_bridge/).
+DEFAULT_BRIDGE_PATH = lhm.DEFAULT_BRIDGE_PATH
 
 #: Fake signal shaping (only used to invent numbers).
 TAU = 2.0 * math.pi
@@ -250,6 +270,15 @@ class FakeSource:
     def values(self):
         """Newest snapshot; the caller must not mutate the returned dict."""
         return dict(self._values)
+
+    def start(self):
+        """Nothing to start: this source is pure arithmetic (kept so the
+        daemon can drive either source the same way)."""
+        return True
+
+    def stop(self):
+        """Nothing to stop; see start()."""
+        return True
 
 
 def _clamp(value, low, high):
@@ -518,7 +547,8 @@ class Daemon:
     """Owns the listening socket, the client registry and the fake ticker."""
 
     def __init__(self, host=BIND_HOST, port=DEFAULT_PORT, token=None,
-                 record_path=None, lenient=False, seed=None):
+                 record_path=None, lenient=False, seed=None,
+                 source=SOURCE_FAKE, bridge_path=DEFAULT_BRIDGE_PATH):
         self.host = host
         self.port = port
         self.token = token or secrets.token_hex(TOKEN_BYTES)
@@ -533,8 +563,37 @@ class Daemon:
         self._shutting_down = False
         self._stop = threading.Event()
         self._srv = None
-        self._source = FakeSource(seed)
+        self.source_kind = source if source in SOURCES else SOURCE_FAKE
+        self.bridge_path = bridge_path
+        self._source = self._make_source(self.source_kind, bridge_path, seed)
+        self._catalog_ids = None      # lhm: metric ids published last
+        self._catalog_metrics = []    # lhm: catalog entries for those ids
+        self._catalog_ver = CATALOG_VER
+        self._catalog_lock = threading.Lock()
         self.stats = collections.Counter()
+
+    def _make_source(self, source, bridge_path, seed):
+        """Pick the value source. Only the source changes, never the protocol."""
+        if source == SOURCE_LHM:
+            # The bridge reports spawn/exit/restart trouble through our log.
+            return lhm.LhmSource(bridge_path, log=self.log)
+        return FakeSource(seed)
+
+    def _start_source(self):
+        """Start the value source (M5: spawns the bridge in the background)."""
+        try:
+            self._source.start()
+        except Exception as exc:  # noqa: BLE001 - a dead source is not a dead daemon
+            self.stats["errors"] += 1
+            self.log("source start failed: %s: %s" % (type(exc).__name__, exc))
+
+    def _stop_source(self):
+        """Stop the value source (M5: terminates the bridge)."""
+        try:
+            self._source.stop()
+        except Exception as exc:  # noqa: BLE001
+            self.stats["errors"] += 1
+            self.log("source stop failed: %s: %s" % (type(exc).__name__, exc))
 
     # -- logging / recording ---------------------------------------------
 
@@ -664,8 +723,70 @@ class Daemon:
             self.stats["data_keys_trimmed"] += dropped
         return copy_msg
 
+    def refresh_catalog(self):
+        """Recompute what the LHM source can actually deliver (M5).
+
+        Returns True when the resolved metric set changed after the first look,
+        i.e. when every connected terminal deserves a new catalog
+        (PROTOCOL.md s.6: a catalog change must be resent). Cheap and lock
+        scoped: it never touches a client or a socket.
+        """
+        metrics = self._source.metrics()
+        ids = tuple(metric.get("id") for metric in metrics)
+        with self._catalog_lock:
+            if ids == self._catalog_ids:
+                return False
+            changed = self._catalog_ids is not None
+            self._catalog_ids = ids
+            self._catalog_metrics = metrics
+            if changed:
+                self._catalog_ver += 1
+                self.log("catalog changed: "
+                         + (",".join(str(i) for i in ids) or "(none)"))
+            return changed
+
+    def current_catalog(self):
+        """(ver, metrics) to publish right now.
+
+        fake mode keeps the fixed METRICS table; lhm mode publishes only the
+        sensors that resolved, with a ver that moves when that set changes.
+        """
+        if self.source_kind == SOURCE_LHM:
+            self.refresh_catalog()
+            with self._catalog_lock:
+                return self._catalog_ver, list(self._catalog_metrics)
+        return CATALOG_VER, METRICS
+
+    def _sync_catalog(self):
+        """Push a fresh catalog to everyone when the metric set changed (s.6)."""
+        if self.source_kind != SOURCE_LHM:
+            return
+        try:
+            if not self.refresh_catalog():
+                return
+        except Exception as exc:  # noqa: BLE001 - never kill the ticker
+            self.stats["errors"] += 1
+            self.log("catalog refresh failed: %s: %s" % (type(exc).__name__, exc))
+            return
+        self.stats["catalog_resends"] += 1
+        for client in self.snapshot():
+            if client.hello is None:
+                continue
+            self.send_catalog(client)
+
+    def _values(self):
+        """Newest values from the source; None means "invalid -> show --" (s.9).
+
+        lhm mode asks the source for a snapshot, which is a dict lookup: the
+        bridge pipe is read by its own thread and never blocks this one.
+        """
+        if self.source_kind == SOURCE_LHM:
+            return self._source.snapshot(time.monotonic())
+        return self._source.values()
+
     def send_catalog(self, client):
-        client.push(protocol.catalog(CATALOG_VER, METRICS))
+        ver, metrics = self.current_catalog()
+        client.push(protocol.catalog(ver, metrics))
 
     def send_scenes(self, client):
         client.push({"t": "scenes",
@@ -685,12 +806,12 @@ class Daemon:
     def send_data(self, client):
         if not client.accepts("data"):
             return
-        msg = protocol.data(self._source.values())
+        msg = protocol.data(self._values())
         msg["ts"] = int(time.time())
         client.push(self._prepare(msg, client), is_data=True)
 
     def broadcast_data(self):
-        values = self._source.values()
+        values = self._values()
         self.stats["data_frames"] += 1
         for client in self.snapshot():
             if not client.accepts("data"):
@@ -914,6 +1035,7 @@ class Daemon:
                     next_data = now + DATA_INTERVAL_S
                     try:
                         self.broadcast_data()
+                        self._sync_catalog()
                     except Exception as exc:  # noqa: BLE001
                         self.stats["errors"] += 1
                         self.log("broadcast failed: %s: %s" % (type(exc).__name__, exc))
@@ -925,6 +1047,7 @@ class Daemon:
     def serve_forever(self):
         """Listen and accept forever. Returns False if the port is unusable."""
         self.open_recording()
+        self._start_source()
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             if os.name != "nt":
@@ -999,6 +1122,7 @@ class Daemon:
                 pass
         for client in self.snapshot():
             client.close("daemon shutting down")
+        self._stop_source()
         with self._rec_lock:
             if self._rec is not None:
                 try:
@@ -1007,21 +1131,39 @@ class Daemon:
                 except OSError:
                     pass
                 self._rec = None
+        if self.source_kind == SOURCE_LHM:
+            source_stats = getattr(self._source, "stats", None)
+            if source_stats:
+                self.log("source stats: "
+                         + ", ".join("%s=%d" % (k, v)
+                                     for k, v in sorted(source_stats.items())))
         self.log("stats: " + ", ".join("%s=%d" % (k, v) for k, v in sorted(self.stats.items())))
 
     def banner(self):
+        live = self.source_kind == SOURCE_LHM
         lines = [
-            "PC-Monitor fake daemon (PROTOCOL.md v0.4, fake data only)",
+            ("PC-Monitor daemon (PROTOCOL.md v0.4, live LibreHardwareMonitor data)"
+             if live else
+             "PC-Monitor fake daemon (PROTOCOL.md v0.4, fake data only)"),
             "  listen   : %s:%d (TCP, NDJSON)" % (self.host, self.port),
             "  token    : " + self.token,
-            "  metrics  : " + ", ".join(m["id"] for m in METRICS),
+        ]
+        if live:
+            bridge = getattr(self._source, "bridge_path", "")
+            present = os.path.isfile(bridge) if bridge else False
+            lines.append("  source   : lhm bridge " + str(bridge)
+                         + (" (found)" if present else " (MISSING, see --bridge)"))
+            lines.append("  metrics  : resolved sensors only, published via catalog")
+        else:
+            lines.append("  metrics  : " + ", ".join(m["id"] for m in METRICS))
+        lines.extend([
             "  scenes   : " + ", ".join("%d=%s" % (i, t) for i, t in enumerate(SCENE_TITLES)),
             "  cadence  : data %g/s, value jitter %g/s, send timeout %dms"
             % (1.0 / DATA_INTERVAL_S, 1.0 / TICK_INTERVAL_S, int(SEND_TIMEOUT_S * 1000)),
             "  record   : " + (str(self._record_path) if self._record_path else "(disabled)"),
             "  token check: " + ("LENIENT (dev only)" if self.lenient else "strict"),
             "  hello    : " + example_hello(self.token),
-        ]
+        ])
         for line in lines:
             self.log(line)
 
@@ -1045,8 +1187,8 @@ def _as_list(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="PC-Monitor fake data daemon (M2): invented metrics over "
-                    "TCP/NDJSON for terminal development.")
+        description="PC-Monitor daemon (M2/M5): metrics over TCP/NDJSON for "
+                    "display terminals, fake numbers or real LHM sensors.")
     parser.add_argument("--host", default=BIND_HOST,
                        help="bind address (default %s; use a LAN address, not 0.0.0.0, "
                             "when you are not on a trusted network)" % BIND_HOST)
@@ -1060,9 +1202,16 @@ def parse_args(argv=None):
     parser.add_argument("--lenient", action="store_true",
                        help="accept unknown tokens (development pairing mode, PROTOCOL.md s.2)")
     parser.add_argument("--fake", action="store_true",
-                       help="fake data (this is the only mode; flag accepted for symmetry)")
+                       help="invented numbers (the same as --source fake; the flag "
+                            "is kept so old command lines still work)")
     parser.add_argument("--seed", type=int, default=None,
                        help="seed the fake value generator for repeatable numbers")
+    parser.add_argument("--source", choices=SOURCES, default=SOURCE_FAKE,
+                       help="value source: fake (invented numbers, default) or lhm "
+                            "(real LibreHardwareMonitor sensors via lhm_bridge.exe)")
+    parser.add_argument("--bridge", metavar="PATH", default=DEFAULT_BRIDGE_PATH,
+                       help="lhm bridge executable (default %s); ignored by --source fake"
+                            % DEFAULT_BRIDGE_PATH)
     return parser.parse_args(argv)
 
 
@@ -1084,7 +1233,8 @@ def write_token_file(token_text):
 def main(argv=None):
     args = parse_args(argv)
     daemon = Daemon(host=args.host, port=args.port, token=args.token,
-                    record_path=args.record, lenient=args.lenient, seed=args.seed)
+                    record_path=args.record, lenient=args.lenient, seed=args.seed,
+                    source=args.source, bridge_path=args.bridge)
     daemon.banner()
     written = write_token_file(daemon.token)
     if written is not None:
