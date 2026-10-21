@@ -626,93 +626,6 @@ def _check(condition, message):
         raise AssertionError(message)
 
 
-class _TapStream:
-    """Popen.stdout lookalike: blocking readline() over a growing file.
-
-    Only the self-test uses this, and only on hosts where creating a pipe is
-    refused (some sandboxes deny os.pipe / CreatePipe outright).
-    """
-
-    def __init__(self, handle, proc, poll_s=0.02):
-        self._handle = handle
-        self._proc = proc
-        self._poll_s = poll_s
-        self._buf = b""
-
-    def readline(self):
-        while True:
-            cut = self._buf.find(b"\n")
-            if cut >= 0:
-                line = self._buf[:cut + 1]
-                self._buf = self._buf[cut + 1:]
-                return line
-            chunk = self._handle.read(65536)
-            if chunk:
-                self._buf += chunk
-                continue
-            if self._proc.poll() is not None:
-                if self._buf:
-                    line, self._buf = self._buf, b""
-                    return line
-                return b""
-            time.sleep(self._poll_s)
-
-    def close(self):
-        try:
-            self._handle.close()
-        except OSError:
-            pass
-
-
-class _TapPopen:
-    """Popen lookalike whose child stdout goes to a file instead of a pipe.
-
-    No CREATE_NO_WINDOW here on purpose: some sandboxes fail the child outright
-    (0xC0000142) with that flag, and this fallback only ever runs in tests.
-    """
-
-    def __init__(self, args, path):
-        self._sink = open(path, "wb")
-        self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL,
-                                     stdout=self._sink, stderr=subprocess.DEVNULL)
-        self._reader = open(path, "rb")
-        self.stdout = _TapStream(self._reader, self.proc)
-
-    @property
-    def pid(self):
-        return self.proc.pid
-
-    def poll(self):
-        return self.proc.poll()
-
-    def wait(self, timeout=None):
-        return self.proc.wait(timeout)
-
-    def terminate(self):
-        return self.proc.terminate()
-
-    def kill(self):
-        return self.proc.kill()
-
-
-def _tap_path():
-    """A writable scratch file for the pipe-less fallback."""
-    import tempfile
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [os.path.join(os.path.dirname(here), "tmp"),
-                  tempfile.gettempdir(), here]
-    for directory in candidates:
-        try:
-            os.makedirs(directory, exist_ok=True)
-            handle, path = tempfile.mkstemp(prefix="pcmon_lhm_tap_", dir=directory)
-            os.close(handle)
-            return path
-        except OSError:
-            continue
-    return os.path.join(here, "pcmon_lhm_tap.tmp")
-
-
 def _poll(predicate, timeout, step=0.05):
     """Wait until predicate() is truthy; returns its value or None."""
     deadline = time.monotonic() + timeout
@@ -794,23 +707,14 @@ def _selftest_catalog_rules():
 
 def _selftest_source():
     """End to end against a scripted bridge: frames, staleness, respawn, stop."""
-    tap = _tap_path()
-    mode = {"pipes": True}
 
-    def spawn(path, interval_ms):
+    def spawn(_path, interval_ms):
         # No file on disk: the scripted bridge is handed to python with -c.
-        args = [sys.executable, "-c", _TEST_BRIDGE, "--interval=%d" % interval_ms]
-        try:
-            return subprocess.Popen(
-                args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, bufsize=BRIDGE_BUFSIZE,
-                startupinfo=_hidden_startupinfo())
-        except OSError as exc:
-            if mode["pipes"]:
-                mode["pipes"] = False
-                print("     note: this host forbids pipes (%s: %s); tailing a "
-                      "file instead" % (type(exc).__name__, exc))
-            return _TapPopen(args, tap)
+        return subprocess.Popen(
+            [sys.executable, "-c", _TEST_BRIDGE, "--interval=%d" % interval_ms],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, bufsize=BRIDGE_BUFSIZE,
+            startupinfo=_hidden_startupinfo())
 
     source = LhmSource("fake_bridge.py", interval_ms=100, spawn=spawn)
     try:
@@ -864,10 +768,6 @@ def _selftest_source():
         _check(source.running() is False, "stop() must join the reader thread")
         _check(all(value is None for value in source.snapshot().values()),
                "a stopped source must report None, never old values")
-        try:
-            os.remove(tap)
-        except OSError:
-            pass
 
 
 def _selftest_cases():
