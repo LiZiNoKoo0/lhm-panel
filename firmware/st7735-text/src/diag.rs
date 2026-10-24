@@ -1,4 +1,4 @@
-//! Diagnostics that go up the wire: boot banner and the per-frame CRC line.
+﻿//! Diagnostics that go up the wire: boot banner and the per-frame CRC line.
 //!
 //! What this does NOT do: no formatting of user data, no buffering, no retries.
 //! Every line here is written once and forgotten -- if the link is down, the

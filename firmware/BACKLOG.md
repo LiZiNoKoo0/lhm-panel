@@ -1044,3 +1044,80 @@ UI PARITY OK (crc=0x0E85F74A, 25600 bytes, 4 frames, 2 matched)
 **WIFI 那行不是故障**：`WIFI fail reason=Disconnected(AuthenticationExpired)`
 在每次 boot 都会出现一次，后面紧跟 `BOOT WIFI ok` —— 是第一次关联被 AP 拒、
 重连成功，属正常路径。
+## T6c 结果：数据超时置 `--`（2026-10-25 05:56，已验证上板）
+
+**PROTOCOL 9.1 在玻璃上跑通了。** 三个阶段的证据都是终端+串口双确认：
+
+| 阶段 | 现象 | 证据 |
+|---|---|---|
+| daemon 在线 | 数字每秒刷新 | `PAGE data n=6` + `FRAME` CRC 每帧不同 |
+| daemon 断开 | 3 秒后变 `--`，角标 `LINK LOST` | `g=1` → `g=0`，`lp` 冻结在最后一次重绘 |
+| daemon 重启 | 自动重连，数字恢复 | `iv=1000` 保留，`g=1` |
+
+### 三个真 bug（都已修 + 有测试钉住）
+
+**1. 迟到的 `catalog` 不回填 → `interval_ms` 恒为 0，整条规则失效**
+
+症状：板子日志 `STALE nodes=6 iv=0`。`any_binding_newly_stale` 第一行
+`if interval == 0 { return false }` 直接短路，**超时逻辑从未执行过**。
+
+根因：`Page::feed` 只在 `ui` 解析成功时调 `apply_intervals`。如果 `catalog`
+晚于 `ui` 到达（重连、重发、丢帧都可能造成），解析 `ui` 时 catalog 表还是空的，
+每个节点都拿到 interval 0。
+
+修法：`catalog` 到达后**重新回填已有 layout**，并且只在 deadline 真的变化时标脏
+（`a_late_catalog_fills_in_the_deadlines_and_repaints`）。
+
+**2. 用 `last_paint` 反推"上次画的是不是数字"——在边界上必然出错**
+
+两次尝试都失败：
+
+- `age_ms(stamp, last_paint)`：`last_paint` 早于数据到达时算出巨大年龄，
+  自检页场景永不触发
+- `last_paint.max(stamp)`：修好了前者，但板子实测 `lp=26299 st=23294`，
+  差 3005 ms **刚好越过 3000 ms 边界**，判定"画的时候就已经过期"，
+  于是永不重绘，数字冻结
+
+修法：**不再推测，改记录事实。** `Page` 加一个 `painted: u32` 位图，
+`render_recording` 在画的同时记下"这个节点画的是数字还是 `--`"。
+判断变成 `was_number && !shows_now`，没有任何时间边界可以输。
+
+**3. 主循环调的是 `render` 不是 `render_recording`**
+
+`painted` 位图只有 `render_recording` 会写。如果主循环继续调 `render`，
+位图永远是 0，规则静默失效。已改。
+
+### 教训：`--` 状态之后不再有 `FRAME`，那不等于停止工作
+
+`mark_clean_at` 只在重绘分支执行，画完 `--` 后 `lp` 冻结、不再重绘
+（这是对的，省 25 KB/s 的 SPI）。但表象是**串口从此再无 `FRAME` 输出**。
+
+我一晚上三次把"没有新日志"当成"功能没生效"，而实际是**系统稳定在正确状态**。
+这正是 2026-10-23 记过的「没日志不能当没行为的证据」，换了个样子又踩一次。
+
+**判据应该是"最后一次状态变化发生在何时、之后是否保持不变"**，
+而不是"此刻是否还有输出"。
+
+### 实现细节
+
+- `Values.stamped[]`：每条读数记到达时刻（`u32` 毫秒）
+- `is_stale()`：`wrapping_sub`，避免 32 位计数器 49.7 天翻转 panic
+- interval 为 0 = "没人描述过这个指标" → **永不过期**（猜时限会误杀活数据）
+- `catalog` 整表替换而非合并（插件退出后必须忘记它）
+- 测试从 166 涨到 **184 条**，全绿；默认构建零 warning
+
+### 验证流程（可复用）
+
+```powershell
+# 1. 起 daemon（token 必须写字面量 0123456789abcdef，写成 *** 会被当成字符串）
+python fake_daemon.py --source lhm --port 7802 --token 0123456789abcdef
+
+# 2. 抓串口（pan.ps1 用 .NET SerialPort，DTR/RTS 默认 false）
+powershell -File firmware\pan.ps1 -Port COM10 -Seconds 12 -Reset
+
+# 3. 杀 daemon，等 3 秒，再看屏：数字应变 --
+```
+
+**注意**：`espflash monitor` 连接时不主动 reset，板子不会重启；
+要重启用 `pan.ps1 -Reset`（脉冲 RTS/EN 150 ms）。
+`espflash flash` 第一次偶尔 `Timeout while running ReadReg`，**重试一次必成功**。

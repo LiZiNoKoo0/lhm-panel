@@ -1,4 +1,4 @@
-//! ST7735 160x80 live text panel: the PC decides what is on the glass.
+﻿//! ST7735 160x80 live text panel: the PC decides what is on the glass.
 //!
 //! Wire format on UART0 (115200 8N1), one frame per line, '\n' terminated:
 //!
@@ -87,7 +87,6 @@ static mut RX_LINE: [u8; LINE_CAP] = [0; LINE_CAP];
 /// 11 ms of 115200 baud, so anything above that loses bytes; 5 ms keeps the
 /// executor cheap and the wire safe.
 const UART_POLL_MS: u64 = 5;
-
 /// Last init step entered, so a panic before the banner still says where it
 /// died. Cheap (one store per step) and survives nothing -- it is rewritten
 /// every boot, which is all a boot loop needs.
@@ -379,6 +378,7 @@ async fn ui_task(mut ui: Ui) -> ! {
     // readings. A local, not a field of `Ui`, because the dispatch below borrows
     // `ui.transport`/`ui.tcp` for the whole `inbox.poll` call.
     let mut page = Page::new();
+    // T6c probe state (see the print site near the end of the loop).
     // Whether the badge is on the glass right now. Kept here rather than inside
     // the scene: the badge is not part of any layout, and a scene that had to
     // know about the link would be asking the wrong layer.
@@ -407,9 +407,10 @@ async fn ui_task(mut ui: Ui) -> ! {
             // 5 ms later. A page that arrives is therefore always followed by
             // its `PAGE` line before the next frame.
             let mut sink = log::ChanLog::new();
+            let now = sys::now_ms();
             inbox.poll(&mut sources, rx, |route, line| match route {
                 Route::Bench => scene.apply(line),
-                Route::Proto => match page.feed(line) {
+                Route::Proto => match page.feed(line, now) {
                     Feed::Layout => {
                         let shown = page.layout().unwrap();
                         diag::page_ui(&mut sink, shown.scene, shown.ver, shown.len());
@@ -459,7 +460,14 @@ async fn ui_task(mut ui: Ui) -> ! {
         // self-test row settling, or on a page/data line that moved the picture.
         // A per-tick repaint would cost 25 KB of SPI ten times a second to draw
         // the same picture.
-        if scene.is_dirty() || page.is_dirty() || badge_changed || boot_changed {
+        //
+        // `is_dirty_at` rather than `is_dirty`: a reading going past its
+        // deadline is a change to the picture that no message announced
+        // (PROTOCOL 9.1). Without it the last number stays on the glass forever
+        // once the daemon goes quiet -- the exact lie the rule forbids. It is an
+        // edge: once the page is drawn as `--` it stops asking.
+        let now = sys::now_ms();
+        if scene.is_dirty() || page.is_dirty_at(now) || badge_changed || boot_changed {
             // One render = one whole frame = one blit. Never paint while
             // streaming pixels over SPI.
             let digest = {
@@ -470,7 +478,12 @@ async fn ui_task(mut ui: Ui) -> ! {
                     // A `ui` page outranks the bench format: the two-row text is
                     // the bench, the page is the product. Both cannot be right
                     // at once, and the one that came with a whole layout wins.
-                    page.render(&mut canvas);
+                    // `render_recording`, not `render`: it also records which
+                    // nodes went to the glass as a number. That word is the only
+                    // fact a later tick can use to notice a figure has aged out
+                    // (PROTOCOL 9.1); plain `render` leaves it stale and the rule
+                    // silently stops working.
+                    page.render_recording(&mut canvas, now);
                     if badge_shown {
                         badge::draw(&mut canvas);
                     }
@@ -485,8 +498,9 @@ async fn ui_task(mut ui: Ui) -> ! {
             diag::frame_line(&mut ui.transport, LCD_W, LCD_H, digest, FRAME_BYTES);
             ui.lcd.blit_rect(0, 0, LCD_W as u16, LCD_H as u16, &frame[..]);
             scene.mark_clean();
-            page.mark_clean();
+            page.mark_clean_at(now);
         }
+
 
         Timer::after(Duration::from_millis(UART_POLL_MS)).await;
     }
