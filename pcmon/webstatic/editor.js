@@ -229,6 +229,21 @@ function editorSmallButton(label, onClick) {
  * a named field, so showing a control the server would reject would just be a
  * slower way to fail.
  */
+/**
+ * Font sizes the firmware can actually draw.
+ *
+ * The panel declares `fonts:[16]` in its hello (panel-core/src/wire.rs) and has
+ * exactly one 8x16 glyph table, so every other size is silently rewritten by
+ * `fit_nodes` before the frame leaves the daemon. A free-text size box is
+therefore a control that cannot work: the operator types 28, the daemon sends
+ * 16, and the screen does not change. Greying it out and saying why is the
+ * honest version.
+ *
+ * Read from the panel's declaration rather than hard-coded, so the day the
+ * firmware grows a second font this stops lying on its own.
+ */
+const PANEL_FONTS = [16];
+
 function editorNodeFields(node) {
   const common = ['x', 'y'];
   if (node.type === 'rect') {
@@ -246,14 +261,57 @@ function editorNodeFields(node) {
   return common;
 }
 
+/** Colour fields get a swatch; the hex box stays usable for exact values. */
+const EDITOR_COLOUR_FIELDS = ['fill', 'color'];
+
 function editorField(node, index, field) {
   const label = document.createElement('label');
   label.className = 'text-[11px] text-gray-500 flex flex-col gap-0.5';
+
+  // `size` is not editable: the firmware has one glyph table. See PANEL_FONTS.
+  if (field === 'size') {
+    const fixed = PANEL_FONTS.length === 1;
+    label.textContent = fixed
+      ? (EDITOR_FIELD_HINTS[field] || field) + '（固件固定）'
+      : (EDITOR_FIELD_HINTS[field] || field);
+    if (fixed) {
+      const fixedBox = document.createElement('input');
+      fixedBox.className =
+        'text-xs px-1.5 py-1 rounded border border-gray-200 bg-gray-100 text-gray-400 font-mono';
+      fixedBox.value = String(PANEL_FONTS[0]);
+      fixedBox.disabled = true;
+      fixedBox.title = '这块板只有一套 8x16 字模，其他字号会被 daemon 改回 16';
+      label.appendChild(fixedBox);
+      return label;
+    }
+    // More than one real size: fall through to a select so the value can only
+    // be one the terminal promised to draw.
+    label.textContent = EDITOR_FIELD_HINTS[field] || field;
+    const pick = document.createElement('select');
+    pick.className = 'text-xs px-1.5 py-1 rounded border border-gray-200 bg-white font-mono';
+    for (const size of PANEL_FONTS) {
+      const option = document.createElement('option');
+      option.value = String(size);
+      option.textContent = String(size);
+      if (Number(node[field]) === size) option.selected = true;
+      pick.appendChild(option);
+    }
+    pick.addEventListener('change', () => editorSetField(index, field, pick.value));
+    label.appendChild(pick);
+    return label;
+  }
+
   label.textContent = EDITOR_FIELD_HINTS[field] || field;
+
+  const colour = EDITOR_COLOUR_FIELDS.indexOf(field) >= 0;
+  const row = document.createElement('span');
+  row.className = 'flex items-center gap-1';
 
   const input = document.createElement('input');
   const value = node[field];
-  input.className = 'text-xs px-1.5 py-1 rounded border border-gray-200 bg-white font-mono';
+  input.className =
+    (colour ? 'flex-1 min-w-0 ' : '') +
+    'text-xs px-1.5 py-1 rounded border border-gray-200 bg-white font-mono';
   input.value = value === undefined || value === null ? '' : String(value);
   input.dataset.node = String(index);
   input.dataset.field = field;
@@ -264,9 +322,33 @@ function editorField(node, index, field) {
     input.setAttribute('list', 'editor-bind-options');
   }
   input.addEventListener('change', () => editorSetField(index, field, input.value));
+  row.appendChild(input);
 
-  label.appendChild(input);
+  if (colour) {
+    // type=color only speaks #rrggbb in lowercase; the wire format is the same
+    // shape, so the two can share one value with no translation layer.
+    const swatch = document.createElement('input');
+    swatch.type = 'color';
+    swatch.className = 'editor-swatch';
+    swatch.value = editorNormaliseColour(value);
+    swatch.title = '选色';
+    swatch.addEventListener('input', () => {
+      input.value = swatch.value;
+      editorSetField(index, field, swatch.value);
+    });
+    row.appendChild(swatch);
+  }
+
+  label.appendChild(row);
   return label;
+}
+
+/** `#RRGGBB` for the colour input, falling back to black when the value is not one. */
+function editorNormaliseColour(value) {
+  if (typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value)) {
+    return value.toLowerCase();
+  }
+  return '#000000';
 }
 
 function editorSetField(index, field, raw) {

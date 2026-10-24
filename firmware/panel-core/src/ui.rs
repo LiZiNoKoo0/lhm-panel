@@ -1,4 +1,4 @@
-﻿//! The `ui` message, as a thing this panel can draw: a fixed table of nodes.
+//! The `ui` message, as a thing this panel can draw: a fixed table of nodes.
 //!
 //! What this does NOT do: no `path` (T7), no `bar`/`dot` sugar, no `bind_w`, no
 //! focus table yet (T6d), no scenes beyond the one that arrived. Those are
@@ -81,15 +81,25 @@ pub enum Kind {
     Num,
 }
 
+/// Font sizes this panel can draw, as pixel heights of the 8x16 cell.
+///
+/// The wire value is the pixel height (size in PROTOCOL 7); the internal
+/// value is that height, and Node::font_scale divides it by the native cell.
+/// A size the panel does not know degrades to 16 rather than to something
+/// unreadable, matching what it_nodes does on the PC side.
+pub const FONT_SIZES: [u8; 3] = [16, 32, 48];
+
 /// One node, in drawing order.
 #[derive(Clone, Copy)]
 pub struct Node {
     pub kind: Kind,
     pub x: i16,
     pub y: i16,
-    /// `rect` only: size. Text and numbers are sized by the font.
+    /// `rect` only: size. Text and numbers are sized by `size`.
     pub w: u16,
     pub h: u16,
+    /// `text`/`num`: one of `FONT_SIZES`, already snapped by the parser.
+    pub size: u8,
     /// Fill for `rect`, ink for `text`/`num`.
     pub colour: u16,
     /// `rect` outline, if the node had `color` as well as `fill`.
@@ -117,6 +127,7 @@ impl Node {
         y: 0,
         w: 0,
         h: 0,
+        size: FONT_SIZES[0],
         colour: 0xFFFF,
         border: None,
         text: [0; MAX_TEXT],
@@ -127,6 +138,14 @@ impl Node {
         unit_len: 0,
         interval_ms: 0,
     };
+
+    /// Integer magnification for this node's font size (1, 2 or 3).
+    ///
+    /// The parser already snapped size into FONT_SIZES, so this is a
+    /// straight division; .max(1) guards a zero that should be impossible.
+    pub fn font_scale(&self) -> usize {
+        (self.size as usize / FONT_SIZES[0] as usize).max(1)
+    }
 
     fn text_str(&self) -> &str {
         core::str::from_utf8(&self.text[..self.text_len as usize]).unwrap_or("")
@@ -364,7 +383,13 @@ impl Layout {
                 // reads as a corruption. Partial cells are a T6 open point.
                 Kind::Text => {
                     if node.x >= 0 && node.y >= 0 {
-                        canvas.text(node.x as usize, node.y as usize, node.text_str().as_bytes(), node.colour)
+                        canvas.text_scaled(
+                            node.x as usize,
+                            node.y as usize,
+                            node.text_str().as_bytes(),
+                            node.colour,
+                            node.font_scale(),
+                        )
                     }
                 }
                 Kind::Num => {
@@ -376,7 +401,13 @@ impl Layout {
                             node.unit_str(),
                             &mut buf,
                         );
-                        canvas.text(node.x as usize, node.y as usize, &buf[..len], node.colour)
+                        canvas.text_scaled(
+                            node.x as usize,
+                            node.y as usize,
+                            &buf[..len],
+                            node.colour,
+                            node.font_scale(),
+                        )
                     }
                 }
             }
@@ -409,6 +440,26 @@ fn trim_line(line: &[u8]) -> &[u8] {
     &line[..end]
 }
 
+/// Snap a wire `size` onto FONT_SIZES, choosing the nearest entry.
+///
+/// Mirrors protocol.fit_nodes on the PC side so the two cannot disagree about
+/// what "28" means. Ties go to the smaller size: a glyph that is too small is
+/// still legible, one that overflows its box is not.
+fn snap_size(raw: Option<&[u8]>) -> u8 {
+    let Some(value) = raw.and_then(json::as_i64) else {
+        return FONT_SIZES[0];
+    };
+    let mut best = FONT_SIZES[0];
+    let mut best_gap = u32::MAX;
+    for size in FONT_SIZES {
+        let gap = (size as i64 - value).unsigned_abs() as u32;
+        if gap < best_gap {
+            best_gap = gap;
+            best = size;
+        }
+    }
+    best
+}
 fn parse_node(raw: &[u8]) -> Result<Node, Error> {
     let f = json::Fields::of(raw).map_err(|_| Error::BadField)?;
     let kind = match f.get(b"type").and_then(json::as_str) {
@@ -443,6 +494,7 @@ fn parse_node(raw: &[u8]) -> Result<Node, Error> {
             };
         }
         Kind::Text => {
+            node.size = snap_size(f.get(b"size"));
             node.colour = match f.get(b"color") {
                 Some(raw) => colour(raw)?,
                 None => 0xFFFF,
@@ -456,6 +508,7 @@ fn parse_node(raw: &[u8]) -> Result<Node, Error> {
             node.text_len = bytes.len() as u8;
         }
         Kind::Num => {
+            node.size = snap_size(f.get(b"size"));
             node.colour = match f.get(b"color") {
                 Some(raw) => colour(raw)?,
                 None => 0xFFFF,

@@ -399,3 +399,21 @@ body {
   color: var(--gray-400);
   border-color: var(--gray-200);
 }
+
+/* Colour swatch next to a hex field. The browser's native colour input is
+   small and square; forcing a size keeps it aligned with the text box beside
+   it instead of stretching to the row height. */
+.editor-swatch {
+  flex: 0 0 auto;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid var(--gray-200);
+  border-radius: .375rem;
+  background: #fff;
+  cursor: pointer;
+}
+
+.editor-swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.editor-swatch::-webkit-color-swatch { border: 0; border-radius: .25rem; }
+.editor-swatch::-moz-color-swatch { border: 0; border-radius: .25rem; }

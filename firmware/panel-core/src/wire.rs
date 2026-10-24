@@ -42,7 +42,7 @@ pub const HELLO: &str = concat!(
     // page containing one, and the page was rejected -- the handshake was
     // telling the daemon a capability this board does not have.
     "\"primitives\":[\"rect\",\"text\",\"num\"],",
-    "\"fonts\":[16],",
+    "\"fonts\":[16,32,48],",
     "\"input\":[],",
     "\"limits\":{\"max_nodes\":32,\"max_json_bytes\":1024,\"max_text_len\":20}}"
 );
@@ -61,7 +61,7 @@ pub const HELLO_TAIL: &str = concat!(
     "\"display\":{\"w\":160,\"h\":80,\"depth\":16},",
     "\"charset\":\"ascii\",",
     "\"primitives\":[\"rect\",\"text\",\"num\"],",
-    "\"fonts\":[16],",
+    "\"fonts\":[16,32,48],",
     "\"input\":[],",
     "\"limits\":{\"max_nodes\":32,\"max_json_bytes\":1024,\"max_text_len\":20}}"
 );
@@ -279,7 +279,10 @@ mod tests {
         assert!(HELLO.contains("\"max_nodes\":32"));
         assert!(HELLO.contains("\"max_json_bytes\":1024"));
         assert!(HELLO.contains("\"max_text_len\":20"));
-        assert!(HELLO.contains("\"fonts\":[16]"));
+        assert!(HELLO.contains("\"fonts\":[16,32,48]"));
+        // The panel has one 8x16 glyph table and draws 32/48 by integer
+        // magnification. Declaring them here is what lets the editor offer
+        // them instead of guessing (T6c follow-up, 2026-10-25).
         // No input devices yet: the daemon must not send focusable nodes.
         assert!(HELLO.contains("\"input\":[]"));
         assert!(!HELLO.contains("\"widgets\""));

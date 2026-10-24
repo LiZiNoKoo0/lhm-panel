@@ -802,6 +802,48 @@ class Daemon:
         client.push({"t": "scenes",
                      "list": [{"i": i, "title": t} for i, t in enumerate(self.scene_titles())]})
 
+    def capabilities(self):
+        """What the connected terminals can actually draw, merged.
+
+        The editor needs this to grey out controls the hardware would silently
+        drop. Without it the dashboard can only guess, and guessing wrong here
+        looks like a broken control rather than a missing capability: the panel
+        declares `fonts:[16]`, `fit_nodes` quietly rewrites `size:28` to 16, and
+        the operator concludes the size field does nothing.
+
+        Merged across terminals, and honest about the empty case: no terminal
+        connected means no answer, which the caller must render as "unknown"
+        rather than as "nothing is supported".
+        """
+        fonts = set()
+        primitives = set()
+        charsets = set()
+        terminals = []
+        for client in self.snapshot():
+            hello = client.hello
+            if not hello:
+                continue
+            declared_fonts = [f for f in _as_list(hello.get("fonts")) if _is_number(f)]
+            declared_prims = [p for p in _as_list(hello.get("primitives")) if isinstance(p, str)]
+            fonts.update(int(f) for f in declared_fonts)
+            primitives.update(declared_prims)
+            charset = hello.get("charset")
+            if isinstance(charset, str):
+                charsets.add(charset)
+            terminals.append({
+                "client_id": client.client_id,
+                "role": client.role,
+                "fonts": sorted(int(f) for f in declared_fonts),
+                "primitives": sorted(declared_prims),
+                "charset": charset,
+            })
+        return {
+            "terminals": terminals,
+            "fonts": sorted(fonts),
+            "primitives": sorted(primitives),
+            "charsets": sorted(charsets),
+        }
+
     def scene_titles(self):
         """Page titles, taken from the applied layouts when there are any.
 

@@ -118,6 +118,11 @@ class Link:
         self._catalog = []
         self._ui = None
         self._values = {}          # id -> {"v": value, "ts": local seconds}
+        #: What the *panel* declared in its hello, as reported by the daemon.
+        #: Empty until one arrives; the editor uses it to grey out controls the
+        #: hardware cannot honour (today: any font size but 16).
+        self._terminal = {}
+        self._hello = None
         self._last_rx = 0.0
         self._since = 0.0
         self.counts = collections.Counter()
@@ -174,6 +179,13 @@ class Link:
         hello = protocol.hello(self.client_id, "thick", self.w, self.h,
                                token=self._current_token(), accept=["ui", "data"],
                                fw="webui-1")
+        # Kept so the editor can gate its controls on what a *real* terminal
+        # accepts. The dashboard's own hello is a thick one and says nothing
+        # useful about the panel's fonts; the panel's hello does, and the daemon
+        # logs it. Filled in by `_adopt_capabilities` from the daemon's banner
+        # and the board's own hello when they are visible.
+        with self._lock:
+            self._hello = hello
         sock.sendall(protocol.encode(hello))
         buf = b""
         while not self._stopped.is_set():
