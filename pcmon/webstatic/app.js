@@ -18,6 +18,7 @@ const PAGE_TITLES = {
   preview: '面板预览',
   metrics: '指标目录',
   terminals: '终端',
+  editor: '布局编辑',
   settings: '设置',
 };
 
@@ -735,6 +736,17 @@ function applyRoute() {
   el('sidebar').classList.remove('open');
   el('scrim').classList.remove('open');
   document.querySelector('main').scrollTop = 0;
+  if (activePage === 'editor') {
+    // Load once per page visit rather than once per session: the applied
+    // layouts can change on disk while the dashboard is open (a daemon start, a
+    // second browser tab), and a stale 「已应用 ver」 would then be a lie.
+    editorWireOnce();
+    if (!editor.loaded || !editorIsDirty()) {
+      editorLoad();
+    } else {
+      renderEditor();
+    }
+  }
   if (latest) render(latest);   // a hidden canvas has no size, so redraw on show
 }
 
@@ -742,6 +754,10 @@ function applyRoute() {
 
 function render(state) {
   latest = state;
+  // The editor module reads the same snapshot for its preview and its bind
+  // hints. Exposed on window because editor.js loads as a separate script and
+  // the two must not keep two copies of the readings.
+  window.__state = state;
   if (!atlas) return;
   pushHistory(state);
   renderChrome(state);
@@ -754,6 +770,12 @@ function render(state) {
   if (visible('preview')) renderPreviewPage(state);
   if (visible('metrics')) renderTable(state);
   if (visible('terminals')) renderTerminals(state);
+  if (visible('editor') && editor.loaded) {
+    // Re-draw only: the draft must survive every incoming frame, so nothing here
+    // may touch editor.draft.
+    drawEditorPreview();
+    updateBindHints(state);
+  }
   if (visible('settings')) renderSettings(state);
 }
 

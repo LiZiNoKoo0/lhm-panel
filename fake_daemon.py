@@ -55,6 +55,7 @@ import threading
 import time
 from pathlib import Path
 
+from pcmon import layouts
 from pcmon import lhm
 from pcmon import protocol
 
@@ -98,6 +99,11 @@ SOURCES = (SOURCE_FAKE, SOURCE_LHM)
 
 #: Where the LHM console bridge lives by default (see tools/lhm_bridge/).
 DEFAULT_BRIDGE_PATH = lhm.DEFAULT_BRIDGE_PATH
+
+#: The applied layouts file, next to this script. Separate from daemon.token on
+#: purpose: the token is a secret that changes per run, this is user work that
+#: must outlive every run (PROTOCOL.md s.22.5).
+DEFAULT_LAYOUT_FILE = "layouts/applied.json"
 
 #: Fake signal shaping (only used to invent numbers).
 TAU = 2.0 * math.pi
@@ -548,7 +554,8 @@ class Daemon:
 
     def __init__(self, host=BIND_HOST, port=DEFAULT_PORT, token=None,
                  record_path=None, lenient=False, seed=None,
-                 source=SOURCE_FAKE, bridge_path=DEFAULT_BRIDGE_PATH):
+                 source=SOURCE_FAKE, bridge_path=DEFAULT_BRIDGE_PATH,
+                 layout_file=DEFAULT_LAYOUT_FILE):
         self.host = host
         self.port = port
         self.token = token or secrets.token_hex(TOKEN_BYTES)
@@ -556,6 +563,9 @@ class Daemon:
         self._record_path = record_path
         self._rec = None
         self._rec_lock = threading.Lock()
+        #: The applied layouts, shared with the web editor. PROTOCOL 22.5: a
+        #: daemon restart resends *this*, never an editor draft.
+        self.layouts = layouts.AppliedLayouts(layout_file)
         self._clients = {}
         self._lock = threading.Lock()
         self._log_lock = threading.Lock()
@@ -790,11 +800,40 @@ class Daemon:
 
     def send_scenes(self, client):
         client.push({"t": "scenes",
-                     "list": [{"i": i, "title": t} for i, t in enumerate(SCENE_TITLES)]})
+                     "list": [{"i": i, "title": t} for i, t in enumerate(self.scene_titles())]})
+
+    def scene_titles(self):
+        """Page titles, taken from the applied layouts when there are any.
+
+        Without this the page list would keep advertising the built-in three
+        names after somebody renames their pages, and the terminal's on-screen
+        pager would lie. Order is the scene index, which is also what
+        `event.page` refers to (PROTOCOL 10).
+        """
+        _, applied = self.layouts.snapshot()
+        if not applied:
+            return list(SCENE_TITLES)
+        last = max(applied)
+        titles = []
+        for index in range(last + 1):
+            scene = applied.get(index)
+            titles.append((scene or {}).get("title") or "P%d" % (index + 1))
+        return titles
 
     def send_scene(self, client, scene):
-        """Push one page, trimmed to the client's capabilities (s.5, s.16.3)."""
+        """Push one page, trimmed to the client's capabilities (s.5, s.16.3).
+
+        The applied layouts win over the built-in ones. That precedence is the
+        whole contract of 22.5: what an operator pressed 应用 on is what every
+        terminal sees, and a daemon restart replays exactly that.
+        """
         if not client.accepts("ui"):
+            return
+        applied = self.layouts.scene(scene)
+        if applied is not None:
+            nodes = protocol.fit_nodes(applied["nodes"], client.hello or {})
+            msg = protocol.ui(scene, self.layouts.ver(), nodes, bg=applied["bg"])
+            client.push(self._prepare(msg, client))
             return
         layout = LAYOUTS.get(scene)
         if layout is None:
@@ -802,6 +841,35 @@ class Daemon:
         nodes = protocol.fit_nodes(layout, client.hello or {})
         msg = protocol.ui(scene, UI_VER, nodes, bg=BG_COLOR)
         client.push(self._prepare(msg, client))
+
+    def broadcast_scene(self, scene):
+        """Push one page to every client that asked for `ui`.
+
+        Called right after an apply. Sent per client rather than once because
+        `fit_nodes` trims to each terminal's limits (s.16 red line 3): the
+        panel and the dashboard get the same page, not the same bytes.
+        """
+        for client in self.snapshot():
+            if client.hello is None:
+                continue
+            if client.scene != scene:
+                continue
+            self.send_scene(client, scene)
+
+    def broadcast_all_scenes(self):
+        """Push every applied page to everyone; used after an apply.
+
+        A page the operator did not open is still resent on the next handshake,
+        but a terminal already showing scene 2 must not wait for that to see
+        scene 2 change.
+        """
+        for client in self.snapshot():
+            if client.hello is None:
+                continue
+            if not client.accepts("ui"):
+                continue
+            if self.layouts.scene(client.scene) is not None:
+                self.send_scene(client, client.scene)
 
     def send_data(self, client):
         if not client.accepts("data"):
@@ -988,9 +1056,37 @@ class Daemon:
         elif key == "state":
             self.log("%s: state event id=%r v=%r"
                      % (client.label(), msg.get("id"), msg.get("v")))
+        elif key == "apply":
+            # The dashboard editor just wrote layouts/applied.json. It tells us
+            # over the wire because the two processes share nothing else, and a
+            # poll loop would either be too slow to feel like a button or wake
+            # the CPU ten times a second for nothing.
+            #
+            # Note this stays inside `event`: the editor is a terminal like any
+            # other (PROTOCOL 5 rule 5 -- terminals report, the daemon decides),
+            # and no new message type is needed to say "I changed the file".
+            self.handle_apply_event(client, msg.get("ver"))
         else:
             self.stats["unknown_events"] += 1
             self.log("%s: unknown event k=%r, ignored" % (client.label(), key))
+
+    def handle_apply_event(self, client, ver):
+        """Re-read the applied layouts and push them to every terminal.
+
+        The file is the source of truth, not the message: an apply that raced a
+        second browser tab, or a hand-edit of the JSON, both end up correct
+        because this reloads from disk instead of trusting the frame.
+        """
+        self.layouts.reload()
+        current = self.layouts.ver()
+        self.stats["applies"] += 1
+        self.log("apply from %s: ver=%s (announced %s) -> broadcast"
+                 % (client.label(), current, ver))
+        self.broadcast_all_scenes()
+        # Page titles may have changed too, and a terminal's pager shows them.
+        for other in self.snapshot():
+            if other.hello is not None:
+                self.send_scenes(other)
 
     def handle_page_event(self, client, want):
         """Page request: "next", one index, or a preload list (s.11)."""
@@ -1295,6 +1391,10 @@ def parse_args(argv=None):
     parser.add_argument("--bridge", metavar="PATH", default=DEFAULT_BRIDGE_PATH,
                        help="lhm bridge executable (default %s); ignored by --source fake"
                             % DEFAULT_BRIDGE_PATH)
+    parser.add_argument("--layouts", metavar="FILE", default=DEFAULT_LAYOUT_FILE,
+                       help="applied layout file (default %s); the daemon resends "
+                            "exactly this after a restart, never an editor draft "
+                            "(PROTOCOL.md s.22.5)" % DEFAULT_LAYOUT_FILE)
     return parser.parse_args(argv)
 
 
@@ -1317,7 +1417,8 @@ def main(argv=None):
     args = parse_args(argv)
     daemon = Daemon(host=args.host, port=args.port, token=args.token,
                     record_path=args.record, lenient=args.lenient, seed=args.seed,
-                    source=args.source, bridge_path=args.bridge)
+                    source=args.source, bridge_path=args.bridge,
+                    layout_file=args.layouts)
     daemon.banner()
     written = write_token_file(daemon.token)
     if written is not None:

@@ -11,6 +11,12 @@ tmp/
 daemon.token
 .daemon-token
 
+# ---- applied layouts: user work, but per-machine ----
+# The file is what an operator pressed 应用 on (PROTOCOL 22.5); it is written by
+# layouts.py. Keeping it out of the repo stops one machine's panel layout from
+# being pushed at everybody who clones, the way a committed .env would.
+layouts/*.json
+
 # ---- Rust firmware build artifacts ----
 firmware/*/target/
 

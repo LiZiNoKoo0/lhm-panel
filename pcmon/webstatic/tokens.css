@@ -352,3 +352,50 @@ body {
 }
 
 :focus-visible { outline: 2px solid var(--indigo); outline-offset: 2px; border-radius: .5rem; }
+
+/* ----------------------------------------------------------------- buttons -- */
+
+/* The bare-button reset near the top of this file means a <button> has no
+   chrome of its own. That is right for icon buttons, and it silently swallowed
+   the editor's 应用 button: the markup asked for Tailwind classes
+   (`bg-[#6366f1] text-white px-3 py-2`), this file implements only the token
+   subset, and no Tailwind is loaded at all. The result was a button that looked
+   exactly like the sentence next to it. Real classes, declared here, end that
+   failure mode for every future button too. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .375rem;
+  padding: .5rem .875rem;
+  border-radius: .5rem;
+  font-size: .75rem;
+  font-weight: 500;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  transition: background-color .15s, border-color .15s, color .15s;
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--indigo);
+  color: #fff;
+  border-color: var(--indigo);
+}
+.btn-primary:hover:not(:disabled) { background: #4f46e5; border-color: #4f46e5; }
+
+.btn-ghost {
+  background: #fff;
+  color: var(--gray-600);
+  border-color: var(--gray-200);
+}
+.btn-ghost:hover:not(:disabled) { background: var(--gray-50); color: var(--ink); }
+
+/* Disabled state has to be visible, not just inert: a button nobody can tell is
+   disabled is a button nobody can find. */
+.btn:disabled {
+  cursor: not-allowed;
+  background: var(--gray-100);
+  color: var(--gray-400);
+  border-color: var(--gray-200);
+}

@@ -36,6 +36,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
         终端
       </a>
+      <a class="nav-item" href="#/editor">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13 6l4 4"/></svg>
+        布局编辑
+      </a>
       <a class="nav-item" href="#/settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
         设置
@@ -217,6 +221,69 @@
         </div>
       </section>
 
+      <!-- =================================================== 页面：布局编辑 == -->
+      <section class="page" data-page="editor" aria-label="布局编辑">
+        <div class="flex flex-wrap items-center gap-3 mb-4">
+          <div id="editor-ver" class="pill pill-wait">未加载</div>
+          <span class="text-xs text-gray-500 tabular" id="editor-dirty"></span>
+          <div class="ml-auto flex items-center gap-2">
+            <button id="editor-revert" class="btn btn-ghost">放弃修改</button>
+            <button id="editor-apply" class="btn btn-primary" disabled>应用</button>
+          </div>
+        </div>
+
+        <div id="editor-note" class="text-xs rounded-lg px-3 py-2 mb-4 hidden"></div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+          <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+            <div class="flex flex-wrap items-baseline justify-between gap-3 mb-3">
+              <h2 class="font-semibold tracking-tight text-sm md:text-base">页面</h2>
+              <div class="flex items-center gap-2">
+                <label class="text-xs text-gray-400" for="editor-page">编辑</label>
+                <select id="editor-page" class="text-xs px-2 py-1 rounded border border-gray-200 bg-white"></select>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mb-4">
+              <label class="text-xs text-gray-500">
+                标题
+                <input id="editor-title" type="text" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-gray-200 bg-white">
+              </label>
+              <label class="text-xs text-gray-500">
+                背景色
+                <input id="editor-bg" type="text" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-gray-200 bg-white font-mono" placeholder="#000000">
+              </label>
+            </div>
+
+            <div class="flex items-baseline justify-between gap-3 mb-2">
+              <h3 class="font-semibold tracking-tight text-sm">节点（顺序即绘制顺序）</h3>
+              <div class="flex items-center gap-2">
+                <button id="editor-add-num" class="text-xs px-2 py-1 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">+ 数值</button>
+                <button id="editor-add-text" class="text-xs px-2 py-1 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">+ 文字</button>
+                <button id="editor-add-rect" class="text-xs px-2 py-1 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">+ 矩形</button>
+              </div>
+            </div>
+            <div id="editor-nodes" class="flex flex-col gap-2"></div>
+            <p class="text-xs text-gray-400 mt-3">
+              改完点「应用」才会推给屏。关掉页面等于放弃修改：这里没有草稿保存，
+              因为 daemon 重启只能重发已应用的那份（PROTOCOL 22.5）。
+            </p>
+          </div>
+
+          <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6 flex flex-col">
+            <div class="flex items-baseline justify-between gap-3 mb-2">
+              <h2 class="font-semibold tracking-tight text-sm md:text-base">预览（未应用）</h2>
+              <span class="text-xs text-gray-400 tabular" id="editor-preview-ver">—</span>
+            </div>
+            <div class="aspect-video flex items-center justify-center bg-gray-50 rounded-lg">
+              <canvas id="editor-canvas" class="panel-canvas w-full" width="640" height="320" role="img" aria-label="编辑中的布局预览"></canvas>
+            </div>
+            <p class="text-xs text-gray-400 mt-2">
+              这是你正在改的东西，不是屏上的样子。点「应用」之后以屏为准。
+            </p>
+          </div>
+        </div>
+      </section>
+
       <!-- =================================================== 页面：设置 ==== -->
       <section class="page" data-page="settings" aria-label="设置">
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
@@ -250,5 +317,6 @@ python -m pcmon.webui --port 7803 --open</pre>
   </div>
 </div>
 <script src="/app.js"></script>
+<script src="/editor.js"></script>
 </body>
 </html>

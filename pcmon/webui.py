@@ -47,9 +47,11 @@ from urllib.parse import urlparse
 
 try:  # imported as a package (python -m pcmon.webui)
     from . import font8x16
+    from . import layouts as layouts_mod
     from . import protocol
 except ImportError:  # pragma: no cover - run as a loose script
     import font8x16
+    import layouts as layouts_mod
     import protocol
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webstatic")
@@ -341,6 +343,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             self._json(self.link.snapshot())
             return
+        if path == "/api/layout":
+            ver, scenes = self.layouts.snapshot()
+            self._json({
+                "ver": ver,
+                "scenes": {str(k): v for k, v in sorted(scenes.items())},
+            })
+            return
         if path == "/events":
             self._events()
             return
@@ -356,6 +365,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/layout/apply":
+            self._apply_layout()
+            return
         if path != "/api/event":
             self._json({"error": "not found"}, 404)
             return
@@ -376,6 +388,65 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._json({"ok": False, "error": str(exc)}, 503)
             return
+
+    def _apply_layout(self):
+        """Save one applied layout set and bump `ver` (PROTOCOL 22.5).
+
+        This is the only write path the editor has. It is deliberately not a
+        "save draft" endpoint: a draft has nowhere to live, because the moment
+        the daemon could resend a draft it would be able to push unfinished
+        work onto a device nobody is looking at. Closing the tab discards it,
+        which is what a draft is.
+
+        The response carries the new ver and the daemon's own view of the file,
+        so the browser shows what the terminals will actually get rather than
+        what it hoped it sent.
+        """
+        raw = self._read_body()
+        try:
+            payload = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, ValueError) as exc:
+            self._json({"ok": False, "error": "不是合法 JSON: %s" % exc}, 400)
+            return
+        if not isinstance(payload, dict):
+            self._json({"ok": False, "error": "请求体必须是对象"}, 400)
+            return
+        scenes = payload.get("scenes")
+        try:
+            ver = self.layouts.apply(scenes)
+        except layouts_mod.LayoutError as exc:
+            # A refused apply changes nothing on disk and tells the editor which
+            # field was wrong -- the alternative is a layout that silently
+            # ignores half of what the user typed.
+            self._json({"ok": False, "error": str(exc)}, 400)
+            return
+        except OSError as exc:
+            self._json({"ok": False, "error": "写入失败: %s" % exc}, 500)
+            return
+
+        # Push it to the daemon so terminals see it without waiting for their
+        # next handshake. A failure here is reported but does not undo the
+        # apply: the file is the source of truth and the daemon re-reads it.
+        pushed = True
+        try:
+            self.link.send({"t": "event", "k": "apply", "ver": ver})
+        except OSError:
+            pushed = False
+
+        current, applied = self.layouts.snapshot()
+        self._json({
+            "ok": True,
+            "ver": current,
+            "pushed": pushed,
+            "scenes": {str(k): v for k, v in sorted(applied.items())},
+        })
+
+    def _read_body(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        return self.rfile.read(length) if length else b""
         self._json({"ok": True})
 
     def _events(self):
@@ -414,8 +485,14 @@ class WebServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def serve(host, port, link):
+def serve(host, port, link, layout_path=None):
     Handler.link = link
+    #: The same object the daemon holds, when they share a file. The editor
+    #: writes through `apply`, which bumps `ver` and saves atomically; the daemon
+    #: sees the new ver the next time it reads, so no socket is needed between
+    #: the two processes (PROTOCOL 22.5).
+    Handler.layouts = layouts_mod.AppliedLayouts(
+        layout_path or os.path.join("layouts", "applied.json"))
     return WebServer((host, port), Handler)
 
 
@@ -433,6 +510,9 @@ def main(argv=None):
     parser.add_argument("--size", default="160x80",
                         help="display size to declare in hello (default 160x80)")
     parser.add_argument("--client-id", default="webui")
+    parser.add_argument("--layouts", default=os.path.join("layouts", "applied.json"),
+                        help="applied layout file written by the daemon "
+                             "(--layouts); the editor reads and applies through it")
     parser.add_argument("--open", action="store_true",
                         help="open the dashboard window when it is ready")
     args = parser.parse_args(argv)
@@ -449,7 +529,7 @@ def main(argv=None):
                 client_id=args.client_id, token_file=token_path)
     link.start()
 
-    httpd = serve(args.host, args.port, link)
+    httpd = serve(args.host, args.port, link, args.layouts)
     url = "http://%s:%d/" % (args.host, args.port)
     print("webui: %s  (daemon %s:%s, %dx%d, client_id=%s)"
           % (url, host, port_text or "7802", w, h, args.client_id))
