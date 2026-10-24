@@ -7,6 +7,7 @@
 //! draws; the panel only has to move the bytes. That is the whole验收 standard
 //! of阶段1: refactor freely, CRC values must not move.
 
+use panel_core::badge;
 use panel_core::canvas::{Canvas, BG};
 use panel_core::link::{backoff_ms, LinkError, Transport};
 use panel_core::scene::{Rows, Scene, FRAME_BYTES, LCD_H, LCD_W};
@@ -49,6 +50,42 @@ fn matches_the_pc_preview() {
 fn empty_input_still_paints_a_black_frame() {
     // A bare "\n" from the PC means "clear the glass", not "keep the last one".
     assert_eq!(digest(""), 0x0448_135D);
+}
+
+#[test]
+fn the_link_lost_badge_matches_the_pc_preview() {
+    // T5.4. The number comes from the same preview call the firmware mirrors:
+    //     P.to_bytes(P.render_page(("CPU 33.5%", "TEMP   34C"), 0xFFFF, 0x0000,
+    //                              badge=True))
+    // Pinned rather than computed so a change to badge geometry has to be made
+    // in *both* renderers, which is the only way the two stay equal by
+    // construction instead of by eye.
+    let mut buf = vec![0u8; FRAME_BYTES];
+    let mut rows = Rows::new();
+    rows.apply(b"CPU 33.5%|TEMP   34C");
+    let mut canvas = Canvas::new(&mut buf, LCD_W, LCD_H);
+    rows.render(&mut canvas);
+    badge::draw(&mut canvas);
+    assert_eq!(canvas.digest(), 0x6A7B_210F);
+
+    // And the badge is an overlay, not a replacement: without it the frame is
+    // exactly the plain one, otherwise "link died" would also mean "picture
+    // changed", which SPEC 4.9 forbids.
+    let mut plain = vec![0u8; FRAME_BYTES];
+    let mut canvas = Canvas::new(&mut plain, LCD_W, LCD_H);
+    rows.render(&mut canvas);
+    assert_eq!(canvas.digest(), 0xEE47_3F67);
+}
+
+#[test]
+fn only_a_scene_with_content_asks_for_the_badge() {
+    // SPEC 4.9: no layout, no badge -- an empty screen has nothing to explain.
+    let mut rows = Rows::new();
+    assert!(!rows.has_layout(), "a fresh scene has no layout");
+    rows.apply(b"CPU 33.5%|TEMP   34C");
+    assert!(rows.has_layout());
+    rows.apply(b"   ");
+    assert!(!rows.has_layout(), "blank rows are not a layout");
 }
 
 #[test]

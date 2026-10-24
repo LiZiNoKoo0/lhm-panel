@@ -1,0 +1,354 @@
+/* ============================================================================
+ * tokens.css -- the Dashboard Layout token subset this page actually uses.
+ *
+ * WHY NOT TAILWIND ITSELF
+ *   The dashboard is served by `python -m pcmon.webui` with the standard
+ *   library. There is no npm, no build step, and no network at runtime, so a
+ *   Play-CDN build is out: it compiles in the browser on every load and goes
+ *   blank offline. What follows is the handful of utilities the markup below
+ *   uses, written out by hand, with the same class names as the style guide so
+ *   the HTML can be checked against that spec line by line.
+ *
+ * IF YOU ADD A CLASS
+ *   Add it here too. An unknown utility class is silently inert in HTML, which
+ *   is exactly how a dashboard drifts away from its design system.
+ *
+ * STYLE RULES HONOURED HERE
+ *   bg #f9fafb page, white panels, gray-900 sidebar, #6366f1 accent;
+ *   rounded-xl panels / rounded-lg controls; shadow-sm, hover:shadow-md;
+ *   transitions 150ms ease-out; prefers-reduced-motion kills all of it.
+ * ==========================================================================*/
+
+:root {
+  --gray-50: #f9fafb;
+  --gray-100: #f3f4f6;
+  --gray-200: #e5e7eb;
+  --gray-400: #9ca3af;
+  --gray-500: #6b7280;
+  --gray-700: #374151;
+  --gray-900: #111827;
+  --ink: #111827;
+  --indigo: #6366f1;
+  --green: #10b981;
+  --red: #ef4444;
+  --amber: #f59e0b;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/* Bare controls by default. A <button> carries no chrome of its own here: the
+   utility classes decide, so an icon button can be *just* an icon instead of
+   fighting the browser's default bevel and padding. */
+button {
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+html, body { margin: 0; }
+
+body {
+  background: var(--gray-50);
+  color: var(--ink);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- layout -- */
+
+.flex { display: flex; }
+.grid { display: grid; }
+.hidden { display: none; }
+.flex-col { flex-direction: column; }
+.flex-wrap { flex-wrap: wrap; }
+.flex-1 { flex: 1 1 0%; }
+.shrink-0 { flex-shrink: 0; }
+.items-center { align-items: center; }
+.items-baseline { align-items: baseline; }
+.items-start { align-items: flex-start; }
+.justify-between { justify-content: space-between; }
+.justify-center { justify-content: center; }
+.min-w-0 { min-width: 0; }
+.cursor-default { cursor: default; }
+.relative { position: relative; }
+.absolute { position: absolute; }
+.-top-1 { top: -.25rem; }
+.-right-1 { right: -.25rem; }
+.w-8 { width: 2rem; }
+.h-8 { height: 2rem; }
+.max-w-md { max-width: 28rem; }
+.overflow-x-auto { overflow-x: auto; }
+.overflow-y-auto { overflow-y: auto; }
+.w-full { width: 100%; }
+.w-64 { width: 16rem; }
+
+.min-h-screen { min-height: 100vh; }
+.h-screen { height: 100vh; }
+.overflow-hidden { overflow: hidden; }
+
+.grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.col-span-2 { grid-column: span 2 / span 2; }
+.lg\:col-span-2 { grid-column: span 2 / span 2; }
+
+.aspect-video { aspect-ratio: 16 / 9; }
+.aspect-square { aspect-ratio: 1 / 1; }
+
+/* ---------------------------------------------------------------- spacing -- */
+
+.gap-1 { gap: .25rem; }
+.gap-2 { gap: .5rem; }
+.gap-3 { gap: .75rem; }
+.gap-4 { gap: 1rem; }
+.gap-6 { gap: 1.5rem; }
+
+.p-1 { padding: .25rem; }
+.p-2 { padding: .5rem; }
+.p-3 { padding: .75rem; }
+.p-4 { padding: 1rem; }
+.p-6 { padding: 1.5rem; }
+.px-2 { padding-left: .5rem; padding-right: .5rem; }
+.px-3 { padding-left: .75rem; padding-right: .75rem; }
+.px-4 { padding-left: 1rem; padding-right: 1rem; }
+.px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+.px-1 { padding-left: .25rem; padding-right: .25rem; }
+.py-1 { padding-top: .25rem; padding-bottom: .25rem; }
+.py-2 { padding-top: .5rem; padding-bottom: .5rem; }
+.py-3 { padding-top: .75rem; padding-bottom: .75rem; }
+.py-4 { padding-top: 1rem; padding-bottom: 1rem; }
+.py-6 { padding-top: 1.5rem; padding-bottom: 1.5rem; }
+.pb-3 { padding-bottom: .75rem; }
+.pt-4 { padding-top: 1rem; }
+.mt-1 { margin-top: .25rem; }
+.mt-2 { margin-top: .5rem; }
+.mt-4 { margin-top: 1rem; }
+.mb-2 { margin-bottom: .5rem; }
+.ml-auto { margin-left: auto; }
+
+/* ------------------------------------------------------------------ type -- */
+
+.font-sans { font-family: inherit; }
+.font-mono { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
+.font-medium { font-weight: 500; }
+.font-semibold { font-weight: 600; }
+.tracking-tight { letter-spacing: -.01em; }
+.tabular { font-variant-numeric: tabular-nums; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.text-left { text-align: left; }
+.text-right { text-align: right; }
+
+.text-xs { font-size: .75rem; line-height: 1.4; }
+.text-sm { font-size: .875rem; line-height: 1.45; }
+.text-base { font-size: 1rem; line-height: 1.5; }
+.text-lg { font-size: 1.125rem; line-height: 1.4; }
+.text-xl { font-size: 1.25rem; line-height: 1.35; }
+.text-2xl { font-size: 1.5rem; line-height: 1.25; }
+.text-3xl { font-size: 1.875rem; line-height: 1.15; }
+
+.text-white { color: #ffffff; }
+.text-gray-400 { color: var(--gray-400); }
+.text-gray-500 { color: var(--gray-500); }
+.text-gray-700 { color: var(--gray-700); }
+.text-\[#111827\] { color: var(--ink); }
+.text-green-500 { color: var(--green); }
+.text-red-500 { color: var(--red); }
+.text-yellow-500 { color: var(--amber); }
+.text-\[#6366f1\] { color: var(--indigo); }
+
+/* ---------------------------------------------------------------- surface -- */
+
+.bg-white { background: #ffffff; }
+.bg-gray-50 { background: var(--gray-50); }
+.bg-gray-100 { background: var(--gray-100); }
+.bg-gray-900 { background: var(--gray-900); }
+.bg-\[#f9fafb\] { background: var(--gray-50); }
+.bg-\[#6366f1\] { background: var(--indigo); }
+.bg-white\/10 { background: rgba(255, 255, 255, .10); }
+
+.border { border: 1px solid var(--gray-200); }
+.border-b { border-bottom: 1px solid var(--gray-200); }
+.border-t { border-top: 1px solid rgba(255, 255, 255, .08); }
+.border-gray-100 { border-color: #f3f4f6; }
+.border-gray-200 { border-color: var(--gray-200); }
+
+.rounded-lg { border-radius: .5rem; }
+.rounded-xl { border-radius: .75rem; }
+
+.shadow-sm { box-shadow: 0 1px 2px rgba(17, 24, 39, .06); }
+.hover\:shadow-md:hover { box-shadow: 0 4px 10px rgba(17, 24, 39, .08); }
+.hover\:bg-gray-50:hover { background: var(--gray-50); }
+.hover\:bg-white\/10:hover { background: rgba(255, 255, 255, .10); }
+.hover\:text-gray-700:hover { color: var(--gray-700); }
+.hover\:text-gray-900:hover { color: var(--gray-900); }
+.hover\:underline:hover { text-decoration: underline; }
+
+/* ------------------------------------------------------------ transitions -- */
+
+.transition-colors { transition: color 150ms ease-out, background-color 150ms ease-out, border-color 150ms ease-out; }
+.transition-all { transition: all 150ms ease-out; }
+.duration-150 { transition-duration: 150ms; }
+.ease-out { transition-timing-function: cubic-bezier(.2, .8, .2, 1); }
+
+.active\:scale-\[0\.97\]:active { transform: scale(.97); }
+
+.focus\:outline-none:focus { outline: none; }
+.focus\:ring-2:focus { box-shadow: 0 0 0 3px rgba(99, 102, 241, .20); }
+.focus\:ring-\[#6366f1\]\/20:focus { box-shadow: 0 0 0 3px rgba(99, 102, 241, .20); }
+.focus\:border-\[#6366f1\]:focus { border-color: var(--indigo); }
+
+/* ------------------------------------------------------- page container -- */
+
+/* One section per route. Hidden pages are display:none, which is why a canvas
+   inside one has zero size until it is shown -- applyRoute() redraws on
+   activation instead of trusting the last paint. */
+.page { display: none; }
+.page.active { display: flex; flex-direction: column; gap: 1rem; }
+
+@media (min-width: 768px) {
+  .page.active { gap: 1.5rem; }
+}
+
+/* ------------------------------------------------------- page components -- */
+
+/* Navigation item: one shape for the whole column, so the active state is the
+   only thing that differs. Focus ring is visible because this is reachable by
+   keyboard (sidebar links are real anchors). */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: .5rem .75rem;
+  border-radius: .5rem;
+  color: var(--gray-400);
+  text-decoration: none;
+  font-size: .875rem;
+  transition: background-color 150ms ease-out, color 150ms ease-out;
+}
+.nav-item:hover { background: rgba(255, 255, 255, .06); color: #f9fafb; }
+.nav-item:focus-visible { outline: 2px solid var(--indigo); outline-offset: 2px; }
+.nav-item[aria-current="page"] { background: rgba(255, 255, 255, .10); color: #ffffff; }
+.nav-item svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+/* KPI cards: hover lifts the card and scales the number slightly. The number is
+   the point of the card, so it is what reacts (style guide: "KPI Focus"). */
+.kpi { transition: box-shadow 150ms ease-out, transform 150ms ease-out; }
+.kpi:hover { box-shadow: 0 4px 10px rgba(17, 24, 39, .08); transform: translateY(-1px); }
+.kpi .kpi-value { transition: transform 150ms ease-out, color 150ms ease-out; display: inline-block; }
+.kpi:hover .kpi-value { transform: scale(1.04); }
+
+/* Table rows give a hover tint, but never on the head row. */
+.data-table tbody tr { transition: background-color 150ms ease-out; }
+.data-table tbody tr:hover { background: var(--gray-50); }
+.data-table th, .data-table td { padding: .5rem .75rem; }
+.data-table thead th {
+  font-size: .6875rem;
+  font-weight: 500;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--gray-400);
+  border-bottom: 1px solid var(--gray-100);
+  text-align: left;
+  white-space: nowrap;
+}
+.data-table tbody td { border-bottom: 1px solid var(--gray-100); font-size: .875rem; }
+.data-table tbody tr:last-child td { border-bottom: none; }
+
+/* Range bar: a background track and a fill. Not a chart, so no canvas here. */
+.track { height: 6px; border-radius: .25rem; background: var(--gray-100); overflow: hidden; }
+.track > i { display: block; height: 100%; background: var(--indigo); transition: width 150ms ease-out; }
+
+/* Canvas surfaces. The panel preview is a real 160x80 raster scaled by an
+   integer factor: `pixelated` is what keeps it honest. */
+.chart-canvas { display: block; width: 100%; height: 100%; }
+.panel-canvas {
+  display: block;
+  width: 100%;
+  background: #000;
+  border-radius: .5rem;
+  image-rendering: pixelated;
+}
+
+/* Status pill. Deliberately rounded-lg, not rounded-full: the style guide
+   forbids pill shapes. Colour is never the only signal -- the text says it. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: .375rem;
+  padding: .125rem .5rem;
+  border-radius: .5rem;
+  font-size: .75rem;
+  font-weight: 500;
+}
+.pill-live { background: rgba(16, 185, 129, .12); color: #047857; }
+.pill-lost { background: rgba(245, 158, 11, .14); color: #92400e; }
+.pill-down { background: rgba(239, 68, 68, .12); color: #b91c1c; }
+.pill-wait { background: var(--gray-100); color: var(--gray-500); }
+
+/* Loading skeletons. Rendered before the first snapshot, removed after it, so
+   the page never shows a confident zero it has not measured. */
+.skeleton {
+  background: linear-gradient(90deg, var(--gray-100) 25%, #eceef1 37%, var(--gray-100) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+  border-radius: .5rem;
+}
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+
+/* ------------------------------------------------------------ responsive -- */
+
+@media (min-width: 768px) {
+  .md\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .md\:px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+  .md\:p-6 { padding: 1.5rem; }
+  .md\:py-6 { padding-top: 1.5rem; padding-bottom: 1.5rem; }
+  .md\:gap-3 { gap: .75rem; }
+  .md\:gap-4 { gap: 1rem; }
+  .md\:gap-6 { gap: 1.5rem; }
+  .md\:text-3xl { font-size: 1.875rem; line-height: 1.15; }
+  .md\:text-base { font-size: 1rem; line-height: 1.5; }
+  .md\:w-72 { width: 18rem; }
+  .md\:flex { display: flex; }
+}
+
+@media (min-width: 1024px) {
+  .lg\:flex { display: flex; }
+  .lg\:hidden { display: none; }
+  .lg\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .lg\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .lg\:col-span-2 { grid-column: span 2 / span 2; }
+}
+
+/* Small screens: the sidebar becomes an overlay drawer instead of a column. */
+@media (max-width: 1023px) {
+  #sidebar.open {
+    display: flex;
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 40;
+    box-shadow: 0 4px 10px rgba(17, 24, 39, .18);
+  }
+  #scrim.open { display: block; position: fixed; inset: 0; z-index: 30; background: rgba(17, 24, 39, .35); }
+}
+
+#scrim { display: none; }
+
+/* -------------------------------------------------------------- a11y/motion -- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  .kpi:hover .kpi-value { transform: none; }
+  .kpi:hover { transform: none; }
+}
+
+:focus-visible { outline: 2px solid var(--indigo); outline-offset: 2px; border-radius: .5rem; }

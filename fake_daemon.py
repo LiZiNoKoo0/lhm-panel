@@ -1044,6 +1044,82 @@ class Daemon:
             self.stats["errors"] += 1
             self.log("ticker crashed: %s: %s" % (type(exc).__name__, exc))
 
+    def _start_discovery(self):
+        """Answer UDP `discover` with `here` on the same port (PROTOCOL 1).
+
+        Same port number, different protocol: the board broadcasts to
+        `255.255.255.255:7802` over UDP and only then opens TCP to whatever
+        address comes back. Without this the terminal has to be flashed with
+        the PC's address, which is exactly the coupling T5.5 removes.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            if os.name != "nt":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.settimeout(ACCEPT_TIMEOUT_S)
+        except OSError as exc:
+            self.log("discovery off: cannot bind UDP %s:%d: %s" % (self.host, self.port, exc))
+            try:
+                sock.close()
+            except OSError:
+                pass
+            return None
+        thread = threading.Thread(
+            target=self._discovery_loop, args=(sock,), daemon=True, name="discovery"
+        )
+        thread.start()
+        self.log("discovering on UDP %s:%d" % (self.host, self.port))
+        return sock
+
+    def _discovery_loop(self, sock):
+        while not self._stop.is_set():
+            try:
+                data, addr = sock.recvfrom(2048)
+            except TimeoutError:
+                continue
+            except OSError as exc:
+                if self._stop.is_set():
+                    break
+                self.stats["errors"] += 1
+                self.log("discovery receive failed: %s" % exc)
+                continue
+            if b'"discover"' not in data:
+                # Not ours. Answering strangers on a broadcast port is how a
+                # daemon becomes someone else's scanner.
+                continue
+            # Built by hand rather than through protocol.encode: this one reply
+            # is four fields with no nesting, and the UDP path has no framing.
+            # Byte-for-byte the example in PROTOCOL 1.
+            reply = ('{"t":"here","ip":"%s","port":%d}'
+                     % (self._local_ip_toward(addr[0]), self.port)).encode("ascii")
+            try:
+                sock.sendto(reply, addr)
+                self.log("discover from %s:%s -> %s" % (addr[0], addr[1], reply.decode("ascii")))
+            except OSError as exc:
+                self.stats["errors"] += 1
+                self.log("discovery reply failed: %s" % exc)
+
+    def _local_ip_toward(self, peer_ip):
+        """The address on this PC that can actually reach `peer_ip`.
+
+        `recvfrom` on a wildcard socket does not say which interface the packet
+        came in on, and this machine has two (wired 192.168.1.128, plus a
+        169.254 link-local). A UDP `connect` sends nothing -- it only makes the
+        kernel pick a route -- so `getsockname` then names the right interface.
+        Reporting the wrong one is worse than useless: the board would try to
+        connect to an address that is not on its subnet.
+        """
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect((peer_ip, self.port))
+            return probe.getsockname()[0]
+        except OSError:
+            return self.host if self.host != "0.0.0.0" else "0.0.0.0"
+        finally:
+            probe.close()
+
     def serve_forever(self):
         """Listen and accept forever. Returns False if the port is unusable."""
         self.open_recording()
@@ -1068,6 +1144,7 @@ class Daemon:
             return False
         self._srv = srv
         self.log("listening on %s:%d (TCP, NDJSON)" % (self.host, self.port))
+        self._discovery = self._start_discovery()
         ticker = threading.Thread(target=self._tick_loop, daemon=True, name="ticker")
         ticker.start()
         try:
@@ -1115,6 +1192,12 @@ class Daemon:
                 return
             self._shutting_down = True
         self._stop.set()
+        discovery = getattr(self, "_discovery", None)
+        if discovery is not None:
+            try:
+                discovery.close()
+            except OSError:
+                pass
         if self._srv is not None:
             try:
                 self._srv.close()

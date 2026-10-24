@@ -27,7 +27,10 @@ This source file is intentionally pure ASCII (TASKS.md coding rules: PowerShell
 
 import copy
 import json
+import os
 import sys
+import threading
+import time
 
 # ---------------------------------------------------------------------------
 # Constants (all magic numbers live here)
@@ -751,18 +754,73 @@ def _selftest_cases():
     ]
 
 
-def _run_selftest():
+# Self-test wall clock budget. The cases are pure functions, so 10 s is already
+# absurdly generous; it exists only so that a future case which blocks (a stray
+# open(), a socket, a read from stdin) can never leave the terminal hanging.
+SELFTEST_TIMEOUT_S = 10.0
+
+
+def _selftest_watchdog(timeout_s=SELFTEST_TIMEOUT_S):
+    """Kill the process if the self-test overruns. Returns a cancel() callable.
+
+    A daemon thread with a plain sleep, not threading.Timer: Timer spawns and
+    joins threads, and the whole point here is to depend on as little as
+    possible while something else is already misbehaving.
+
+    os._exit is deliberate. A blocked read cannot be interrupted from another
+    thread on Windows, so sys.exit() would leave the process sitting there --
+    exactly the hang this is meant to break.
+    """
+    deadline = time.monotonic() + float(timeout_s)
+    done = threading.Event()
+
+    def _guard():
+        while not done.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                sys.stderr.write("WATCHDOG: selftest exceeded %gs\n" % float(timeout_s))
+                sys.stderr.flush()
+                os._exit(2)
+            done.wait(min(remaining, 0.1))
+
+    thread = threading.Thread(target=_guard, name="selftest-watchdog")
+    thread.daemon = True
+    thread.start()
+    return done.set
+
+
+def _run_selftest(timeout_s=SELFTEST_TIMEOUT_S):
+    """Run every case, isolate failures, never block forever.
+
+    Contract: this returns in well under SELFTEST_TIMEOUT_S with either
+    "ALL OK" or one FAIL line per broken case. Each case is announced before
+    it runs, so a hang (should one ever come back) names its own culprit in the
+    last line of output.
+    """
     cases = _selftest_cases()
+    total = len(cases)
+    cancel = _selftest_watchdog(timeout_s)
     failures = []
-    for name, case in cases:
-        try:
-            case()
-        except Exception as exc:  # noqa: BLE001 - a failing case must not stop the rest
-            failures.append((name, exc))
+    try:
+        for index, (name, case) in enumerate(cases, 1):
+            print("[%d/%d] %s ..." % (index, total, name), end=" ")
+            sys.stdout.flush()
+            started = time.monotonic()
+            try:
+                case()
+            except Exception as exc:  # noqa: BLE001 - a failing case must not stop the rest
+                failures.append((name, exc))
+                print("FAIL (%s)" % type(exc).__name__)
+            else:
+                print("ok (%d ms)" % int((time.monotonic() - started) * 1000))
+            sys.stdout.flush()
+    finally:
+        cancel()
+
     for name, exc in failures:
         print("FAIL " + name + ": " + type(exc).__name__ + ": " + str(exc))
     if failures:
-        print("FAILED " + str(len(failures)) + "/" + str(len(cases)))
+        print("FAILED " + str(len(failures)) + "/" + str(total))
         return 1
     print("ALL OK")
     return 0

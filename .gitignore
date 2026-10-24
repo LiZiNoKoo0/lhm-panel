@@ -23,3 +23,13 @@ Thumbs.db
 desktop.ini
 *.swp
 .DS_Store
+
+# ---- debug/probe artifacts ----
+*.err
+*.out
+PktMon.etl
+cap*.txt
+_child.txt
+reconnect_probe*
+run-*.bat.bak*
+

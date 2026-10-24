@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC-Monitor · 上位机仪表盘</title>
+<link rel="stylesheet" href="/tokens.css">
+</head>
+<body class="bg-[#f9fafb] text-[#111827] font-sans">
+<div class="flex h-screen overflow-hidden">
+
+  <!-- ===================================================== 侧边导航栏 ==== -->
+  <aside id="sidebar" class="hidden lg:flex w-64 shrink-0 h-screen flex-col bg-gray-900 text-white">
+    <div class="px-4 py-4 flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-[#6366f1] flex items-center justify-center font-semibold text-sm shrink-0">PC</div>
+      <div class="flex flex-col min-w-0">
+        <span class="text-sm font-semibold tracking-tight truncate">PC-Monitor</span>
+        <span class="text-xs text-gray-400 truncate">上位机仪表盘</span>
+      </div>
+    </div>
+
+    <nav class="flex-1 px-2 py-2 flex flex-col gap-1 overflow-y-auto" aria-label="主导航">
+      <a class="nav-item" href="#/overview" aria-current="page">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        概览
+      </a>
+      <a class="nav-item" href="#/preview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8"/></svg>
+        面板预览
+      </a>
+      <a class="nav-item" href="#/metrics">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>
+        指标目录
+      </a>
+      <a class="nav-item" href="#/terminals">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+        终端
+      </a>
+      <a class="nav-item" href="#/settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+        设置
+      </a>
+    </nav>
+
+    <div class="px-4 py-4 border-t">
+      <div class="flex items-center gap-2 min-w-0">
+        <div class="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-xs font-semibold shrink-0">LZ</div>
+        <div class="flex flex-col min-w-0">
+          <span class="text-sm truncate">LiZi</span>
+          <span class="text-xs text-gray-400 truncate" id="side-daemon">daemon —</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div id="scrim"></div>
+
+  <!-- ===================================================== 右侧主体 ====== -->
+  <div class="flex-1 min-w-0 flex flex-col overflow-hidden">
+
+    <!-- 顶部工具栏：标题 / 通知 / 用户。与内容区之间用一道极轻的阴影分层，
+         不用分割线：白底与 #f9fafb 的色差本来就在。 -->
+    <header class="bg-white px-4 md:px-6 py-3 flex items-center gap-3 md:gap-4 shrink-0 shadow-sm">
+      <button id="menu" type="button" aria-label="打开导航"
+              class="lg:hidden rounded-lg font-medium text-sm transition-colors text-gray-700 bg-gray-100 p-2 active:scale-[0.97] focus:ring-2 focus:outline-none">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+
+      <span id="page-title" class="font-semibold tracking-tight text-sm md:text-base">概览</span>
+
+      <div class="ml-auto flex items-center gap-3 md:gap-4">
+        <!-- 图标直接浮在顶栏上：无底色、无边框、无圆角盒。
+             键盘用户仍有焦点环（全局 :focus-visible），鼠标点击不再弹出盒子。 -->
+        <button id="bell" type="button" aria-describedby="bell-count"
+                class="relative rounded-lg font-medium text-sm transition-colors text-gray-500 hover:text-gray-900 active:scale-[0.97]">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 8a6 6 0 10-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>
+          <span id="bell-count" class="absolute -top-1 -right-1 text-xs font-medium text-white bg-gray-900 rounded-lg px-1 tabular">0</span>
+        </button>
+        <div class="hidden md:flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-[#6366f1] text-white flex items-center justify-center text-xs font-semibold">LZ</div>
+          <div class="flex flex-col min-w-0">
+            <span class="text-sm font-medium">LiZi</span>
+            <span class="text-xs text-gray-400">Administrator</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6">
+
+      <!-- =================================================== 页面：概览 ==== -->
+      <section class="page active" data-page="overview" aria-label="概览">
+        <div class="flex flex-wrap items-center gap-3 md:gap-4">
+          <div id="badge" class="pill pill-wait">等待数据</div>
+          <span id="meta" class="text-xs text-gray-500 tabular"></span>
+          <span class="text-xs text-gray-400 ml-auto tabular" id="counts"></span>
+        </div>
+
+        <div id="kpis" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4" aria-label="关键指标">
+          <!-- 由 app.js 填充；首帧前是骨架屏 -->
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+          <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6 transition-colors hover:shadow-md">
+            <div class="flex items-baseline justify-between gap-3 mb-2">
+              <h2 class="font-semibold tracking-tight text-sm md:text-base">CPU / 内存 · 最近 60 秒</h2>
+              <span class="text-xs text-gray-400 tabular" id="chart-legend">—</span>
+            </div>
+            <div class="aspect-video">
+              <canvas id="chart" class="chart-canvas" role="img" aria-label="CPU 与内存使用率折线图"></canvas>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6 transition-colors hover:shadow-md flex flex-col">
+            <div class="flex items-baseline justify-between gap-3 mb-2">
+              <h2 class="font-semibold tracking-tight text-sm md:text-base">面板预览</h2>
+              <span class="text-xs text-gray-400 tabular" id="mini-scene">—</span>
+            </div>
+            <div class="aspect-video flex items-center justify-center bg-gray-50 rounded-lg">
+              <canvas id="panel-mini" class="panel-canvas w-full" width="640" height="320" role="img" aria-label="160x80 面板预览"></canvas>
+            </div>
+            <p class="text-xs text-gray-400 mt-2">
+              <a class="text-[#6366f1] hover:underline" href="#/preview">查看大图与节点表</a>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================ 页面：面板预览 == -->
+      <section class="page" data-page="preview" aria-label="面板预览">
+        <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+          <div class="flex flex-wrap items-baseline justify-between gap-3 mb-2">
+            <h2 class="font-semibold tracking-tight text-sm md:text-base">面板预览</h2>
+            <span class="text-xs text-gray-400 tabular" id="scene">—</span>
+          </div>
+          <div class="flex items-center justify-center bg-gray-50 rounded-lg p-2">
+            <canvas id="panel-big" class="panel-canvas w-full" width="1280" height="640" role="img" aria-label="160x80 面板预览（放大）"></canvas>
+          </div>
+          <p id="preview-note" class="text-xs text-gray-400 mt-2"></p>
+          <div id="preview-empty" class="text-sm text-gray-400 mt-2">daemon 还没下发 ui</div>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-sm border border-gray-100">
+          <div class="px-4 md:px-6 py-3 border-b border-gray-100 flex items-baseline justify-between gap-3">
+            <h2 class="font-semibold tracking-tight text-sm md:text-base">节点表（绘制顺序）</h2>
+            <span class="text-xs text-gray-400 tabular" id="node-count">—</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="data-table w-full">
+              <thead>
+                <tr>
+                  <th>#</th><th>type</th><th>位置</th><th>尺寸</th><th>绑定</th><th>颜色</th>
+                </tr>
+              </thead>
+              <tbody id="node-body"></tbody>
+            </table>
+          </div>
+          <div id="node-empty" class="px-4 md:px-6 py-6 text-sm text-gray-400">还没有 ui 消息</div>
+        </div>
+      </section>
+
+      <!-- ================================================ 页面：指标目录 == -->
+      <section class="page" data-page="metrics" aria-label="指标目录">
+        <div class="bg-white rounded-xl shadow-sm border border-gray-100">
+          <div class="px-4 md:px-6 py-3 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
+            <div class="flex items-baseline gap-3">
+              <h2 class="font-semibold tracking-tight text-sm md:text-base">指标目录</h2>
+              <span class="text-xs text-gray-400 tabular" id="catalog-ver">—</span>
+            </div>
+            <div class="w-full md:w-72">
+              <input id="search" type="search" autocomplete="off" aria-label="搜索指标"
+                     placeholder="搜索指标（id 或名称）"
+                     class="w-full bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#6366f1]/20 focus:border-[#6366f1] transition-all px-3 py-2">
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="data-table w-full" id="table">
+              <thead>
+                <tr>
+                  <th>指标</th>
+                  <th class="text-right">当前值</th>
+                  <th class="text-right">变化</th>
+                  <th class="text-right">数据年龄</th>
+                  <th>量程</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="table-body"></tbody>
+            </table>
+          </div>
+          <div id="table-empty" class="px-4 md:px-6 py-6 text-sm text-gray-400">等待 catalog…</div>
+        </div>
+      </section>
+
+      <!-- =================================================== 页面：终端 ==== -->
+      <section class="page" data-page="terminals" aria-label="终端">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+          <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+            <h2 class="font-semibold tracking-tight text-sm md:text-base mb-2">本页的连接</h2>
+            <table class="data-table w-full">
+              <tbody id="link-body"></tbody>
+            </table>
+          </div>
+          <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+            <div class="flex items-baseline justify-between gap-3 mb-2">
+              <h2 class="font-semibold tracking-tight text-sm md:text-base">收到过的帧</h2>
+              <span class="text-xs text-gray-400">按类型计数</span>
+            </div>
+            <table class="data-table w-full">
+              <thead><tr><th>类型</th><th class="text-right">数量</th><th>含义</th></tr></thead>
+              <tbody id="frames-body"></tbody>
+            </table>
+            <p class="text-xs text-gray-400 mt-4">
+              协议里 daemon 不广播“谁在线”，所以这里只能看到本页自己这一路连接。
+              要列出所有终端，需要 daemon 增加一个只读注册表接口——目前没有。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- =================================================== 页面：设置 ==== -->
+      <section class="page" data-page="settings" aria-label="设置">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+          <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+            <h2 class="font-semibold tracking-tight text-sm md:text-base mb-2">当前生效的参数</h2>
+            <table class="data-table w-full">
+              <thead><tr><th>项</th><th>值</th><th>来自</th></tr></thead>
+              <tbody id="config-body"></tbody>
+            </table>
+            <p class="text-xs text-gray-400 mt-4">
+              这一页现在是只读的：值由命令行参数决定，改完要重启 webui。等 daemon 有了写接口再做可编辑。
+            </p>
+          </div>
+          <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+            <h2 class="font-semibold tracking-tight text-sm md:text-base mb-2">怎么启动</h2>
+            <pre class="text-xs font-mono text-gray-700 bg-gray-50 rounded-lg p-3 overflow-x-auto">python fake_daemon.py --source lhm --port 7802
+python -m pcmon.webui --port 7803 --open</pre>
+            <p class="text-xs text-gray-400 mt-2">
+              本页是 <span class="font-mono">thick</span> 终端：走 7802 的 TCP/NDJSON，
+              与开发板完全同一条协议。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <footer class="flex flex-wrap items-center gap-4 text-xs text-gray-400 pt-4">
+        <span id="warn" class="text-red-500"></span>
+        <span>PROTOCOL.md v0.4</span>
+      </footer>
+    </main>
+  </div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

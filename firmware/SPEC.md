@@ -133,9 +133,9 @@ heap: 65536 free=64512  clock: 5ms
 ```
 
 - `heap:` = allocator 实际持有字节数,`free=` 是**探针分配仍被持有**时的剩余字节。
-  所以 `free < size` 才说明分配真的成功;`free == size` 意味着探针没跑,不是“堆很健康”。
+  所以 `free < size` 才说明分配真的成功;`free == size` 意味着探针没跑,不是"堆很健康"。
 - `clock:` = 上电至今毫秒数。**它不是 0**:横幅在 `esp_hal::init()` 与 UART 配置之后才打,
-  这中间已经过了几毫秒;0 只会出现在 `main` 的第一行。“从 0 开始”指**计数原点**,
+  这中间已经过了几毫秒;0 只会出现在 `main` 的第一行。"从 0 开始"指**计数原点**,
   不是指横幅上的数字,也不许为了让它是 0 而减去偏移(那是伪造读数)。
 
 ### 3.5 传感器(可选)
@@ -157,6 +157,27 @@ heap: 65536 free=64512  clock: 5ms
 | KEY1-KEY4 | 32 / 33 / 25 / 26 | **预留**(暂不实现) |
 
 **禁止**使用 GPIO0/2/5/12/15 做按键(strapping 或已占用);34-39 为 input-only 且无内部上拉,不做按键。
+
+### 3.8 静态内存与栈(本板,2026-10-22 新增)
+
+这一节不是建议,是这颗芯片的物理事实,违反后的症状会伪装成“WiFi 坏了”。
+
+| 事实 | 值 |
+|---|---|
+| DRAM 区间 | `.data` / `.bss` / 堆 / 主任务栈共用一段,顶端 `0x3FFE_0000` |
+| 栈的位置 | **链接器把它直接摆在 `.bss` 之后**:`栈大小 = 0x3FFE0000 - _bss_end` |
+| 当前实测 | 默认构建 28,612 B;带链路泵的构建 21,868 B |
+
+推论:**任何静态变量的增长都直接从主任务栈里扣。**
+
+- 固件 MUST 在启动时断言栈 ≥ **16 KB**(`sys::MIN_STACK_BYTES`),并在 banner 后
+  打一行 `stack: <n> bytes for the main task`。
+- 固件 MUST NOT 用“为将来多留点”的理由放大静态队列/缓冲。一个方向 8 行的行队列
+  就是 8,384 B `.bss` = 从栈里拿走 8 KB。
+- 看门狗阈值:栈跌到 11.2 KB 时,开机、banner、屏幕全部正常,崩在 WiFi 关联里,
+  panic 指向 ROM 地址(见 BACKLOG B-1)。
+- 移植到其它芯片时,如果它的栈不跟 `.bss` 抢同一块内存,本节不适用;但
+  “启动断言 + banner 报数”这两件事 **仍然 SHOULD 保留**。
 
 ---
 
@@ -277,6 +298,12 @@ heap: 65536 free=64512  clock: 5ms
 
 角标规则:右下角,8×16 单元,`LINK LOST` 占 9 字符 = 72px,白底黑字(反相)以区别于正文;**不覆盖任何被 bind 的节点区域**,实在放不下就不画(数据优先)。
 
+> **2026-10-23 T5.4 实现注记**:几何写死在 `panel-core/src/badge.rs`(`X=88 Y=64 W=72 H=16`),
+> PC 侧同一份在 `preview_st7735.py::draw_badge`,两边的帧 CRC 必须相等(钉在
+> `panel-core/tests/parity.rs`)。角标出现/消失各打一行 `BADGE on|off`——它是**板子唯一自己决定
+> 画的东西**,而它最危险的故障不是“不出现”(看得见)而是“不消失”(看起来像数据变旧了)。
+> 当前“有布局”的判据 = 场景里有非空白内容(`Scene::has_layout`),T6 接管后改为“拿到了布局”。
+
 ### 4.10 刷新节流
 
 | # | 规则 |
@@ -292,7 +319,8 @@ heap: 65536 free=64512  clock: 5ms
 ### 5.1 本板的 `hello` 原文(MUST 逐字一致,除版本号)
 
 ```json
-{"t":"hello","v":1,"client_id":"st7735-160x80","role":"thin",
+{"t":"hello","proto":1,"token":"","client_id":"st7735-160x80","role":"thin",
+ "accept":["ui","data"],
  "display":{"w":160,"h":80,"depth":16},
  "charset":"ascii",
  "primitives":["rect","text","num","path"],
@@ -301,9 +329,31 @@ heap: 65536 free=64512  clock: 5ms
  "limits":{"max_nodes":32,"max_json_bytes":1024,"max_text_len":20}}
 ```
 
+> **2026-10-22 T5.1 修正(三处,均为"原文写错了"而不是"加功能")**:
+>
+> 1. **`v` → `proto`**。PROTOCOL §5 的字段名是 `proto`,daemon 也只读 `proto`;
+>    本文原来的 `v` 从来没有被任何一端读过。按 §0"与 PROTOCOL 冲突以 PROTOCOL 为准"。
+> 2. **补 `token`**。daemon 的 `_check_hello` 要求 token 匹配,否则回 `deny bad token`
+>    并断连。T5 阶段先发空串(daemon 需 `--lenient` 启动);token 入 flash 是 T5.6,
+>    它要动配置页与存储格式,不与链路改造混在一张卡里。
+> 3. **补 `accept`**。daemon 只在 `client.accepts("ui")` 为真时才发 `ui`,
+>    不带这一项 = 连接正常、只收到 catalog、然后再无下文。
+>
+> **2026-10-23 T5.6 已完成**：token 进了 flash（记录 `ver = 2`，见 `creds.rs`），
+> 配网页多一个 `Daemon token` 输入框（留空 = 保持已存的），`hello` 的 token 从存储里取
+> （`LINK hello tx n=304` = 288 + 16）。**严格 daemon（不带 `--lenient`）现在能直接接受**；
+> token 不对时 daemon 回 `deny bad token`，板上打 `BOOT LINK fail` 并把 LINK 那行画成红色
+> （帧 CRC `0x1EFEB12B`）。
+>
+> 逐字节原文钉在 `panel-core/src/wire.rs::HELLO`,由 `wire::tests` 校验形状、
+> 上限与三个必需字段--**以那份常量为准,本节只是它的人读版本**。
+
 - `fonts:[16]` 是**字高**(8×16 点阵),不是字宽。
 - `input:[]` 表示没有输入设备 → daemon MUST NOT 下发 `focusable` 节点。
 - 阶段4 起追加 `"widgets":["line"]`。
+- **T6 起追加 `"layout":{"ver":<n>}`**(设备当前生效的布局版本,未实现)。
+  没有它,PC 连上后无法判断设备是不是已经有这一版,只能无脑重推;
+  而设备侧"同一 ver 不写 flash"(S-4)也就无法跨重启成立。
 
 ### 5.2 必须处理的消息
 
@@ -331,8 +381,29 @@ heap: 65536 free=64512  clock: 5ms
 | L-2 | 重连退避 1 / 2 / 4 / 8 / 10s 封顶,与 `pcmon/lhm.py` 同一阶梯 |
 | L-3 | 重连成功后 MUST 重发 `hello`(不许假设 daemon 还记着你) |
 | L-4 | 收到 `hello` 响应前后,都不许阻塞渲染循环 |
+| L-5 | 退避计数**只在握手完成**(收到 `catalog`)时清零。`LINK up` 只是“socket 建起来了”,不是“终端被接受了”——否则被 `deny` 之后会每秒重试一次,阶梯永远爬不起来(2026-10-22 上板踩到)|
 
 ---
+
+### 5.5 输入与事件上报(2026-10-22 新增)
+
+> 需求原话:"电脑端关于设备的指令只能收到设定好的具体文字,因为电脑其实知道'第 3 页的第二个按键'代表'关机',设备发过来的就是'第三页的第二个按键'。"
+
+| # | 规则 |
+|---|---|
+| I-1 | 固件 **MUST NOT** 存任何语义:没有按钮标签、没有动作名、没有"关机"这三个字。它只知道"一共有几个可选项、现在选的是第几个" |
+| I-2 | 上报形状固定为 `{"t":"event","k":"key","id":"focus","v":<n>,"scene":<i>}`。**序号 1 基**(PROTOCOL §11.5),设备内部若用 0 基数组,出线前加一,全工程只允许在这一处换算 |
+| I-3 | `scene` 是本板 MUST 带的字段:`ui` 切换在途时,不带页号的按键会被算到错的一页上,而 event 不重传、无法补救 |
+| I-4 | 焦点越界 MUST 按 PROTOCOL §11.5 处理:收到新 `ui` 后 `焦点 >= 项数` → 焦点 = 1 |
+| I-5 | 显示**本地页**时按键 **MUST NOT** 上报:那是设备自己的解释(翻页/进出),PC 不需要也不应该知道 |
+| I-6 | 固件 **MUST NOT** 实现危险动作(关机、重启以外的系统操作)。"重启"只接受 `cmd` 的 `reboot`,且是 PC 端显式下发;危险操作一律在 PC 侧二次确认 |
+
+**焦点高亮需要几何,这是 T6 的硬需求**:`ui` 解析时 MUST 额外保存一张 focus 表
+(项数 + 每项的 `x/y/w/h`,≤32)。没有它,按键在屏上是**隐形**的--人按了没反馈,
+而串口一切正常,属于最难查的那类问题。
+
+这台板子 `hello.input = []`（无输入设备）时,daemon MUST NOT 下发 `focusable` 节点；
+L1 把按键装上后改为 `["key"]`，**这一项变更与 L5 同时生效**，不能提前改。
 
 ## 6. 持久化
 
@@ -383,6 +454,27 @@ READY
 **MUST** 在复位前向串口吐一行:`PANIC <file>:<line> <msg>`,然后复位(不许 `loop {}` 静默死)。
 实现建议:用 `esp-println`(0.15,独立于 esp-hal 版本,只要求 critical-section)。
 
+### 7.4 链路与角标行(阶段2 起,逐字可钉)
+
+```
+LINK tcp peer=<ip>:<port>      将尝试连接
+LINK up                        socket 建立(不代表握手成功)
+LINK hello tx n=<bytes>        每次新建连接后发 hello
+LINK catalog n=<count> ver=<n>  握手完成(唯一会清零退避阶梯的事件)
+LINK deny reason=<text>        daemon 自己的理由(bad token / proto mismatch)
+LINK ping                     收到 ping 并已排队 pong
+LINK unknown kind=<name> n=<k>  未知消息种类(W7)
+LINK silent ms=<n>             15s 无字节(SPEC L-1)
+LINK lost idle=<ms>            socket 结束,附最后静默时长
+LINK fail reason=<Name>        连接失败,用库的变体名而非自编数字
+LINK backoff ms=<n> tries=<n>  重连前等待(SPEC L-2)
+BADGE on|off                   LINK LOST 角标出现/消失
+```
+
+**为什么 `BADGE` 也要占一行**:角标是这块板**唯一自己决定画的东西**,而它最容易出的事不是
+"不出现"(一眼能看见)而是"不消失"——夹在健康链路上的角标会让用户以为数据过期了。
+脚本看不见玻璃,只能让板子自己说出来(T5.4,2026-10-23)。
+
 ---
 
 ## 8. 代码规范
@@ -418,10 +510,10 @@ READY
 
 1. **别信"看着一样"**:面板偏移/镜像(`MADCTL`)错了,画面也会"看起来正常"但 CRC 永远不等。
 2. **SPI 字节序**:RGB565 发大端还是小端,取决于 `COLMOD` 与面板;先跑 P2 的色块确认。
-3. **DTR/RTS 复位**：USB 串口芯片的 EN/IO0 反相电路会把人坑死（本板实测：EN 脉冲三成被吞；
-   而且实时画面**根本不需要复位**，别为了“让它刷新”反复拉 EN）。
-   **被吞的复位会把固件伪装成“死了”**：芯片停在 espflash 留下的 ROM 下载模式，串口一个字不出。
-   所以任何依赖复位的验证脚本 MUST 重试（`check_parity.py` 现在是 4 次、听到启动日志才停）。
+3. **DTR/RTS 复位**:USB 串口芯片的 EN/IO0 反相电路会把人坑死(本板实测:EN 脉冲三成被吞;
+   而且实时画面**根本不需要复位**,别为了"让它刷新"反复拉 EN)。
+   **被吞的复位会把固件伪装成"死了"**:芯片停在 espflash 留下的 ROM 下载模式,串口一个字不出。
+   所以任何依赖复位的验证脚本 MUST 重试(`check_parity.py` 现在是 4 次、听到启动日志才停)。
 4. **flash 写入期间断网/断电**:A/B 扇区不是为了省事,是为了"应用时断电也能开机"。
 
 ---

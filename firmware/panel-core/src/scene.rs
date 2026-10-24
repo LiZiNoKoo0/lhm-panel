@@ -38,6 +38,15 @@ pub trait Scene {
     /// input event.
     fn render(&mut self, canvas: &mut Canvas<'_>);
     fn mark_clean(&mut self);
+    /// Is the glass showing a layout worth keeping when the link dies?
+    ///
+    /// SPEC 4.9 says a dead link must **not** blank the picture: it stays, and
+    /// gets a `LINK LOST` badge. A scene that has never painted anything (empty
+    /// bench buffer; later the fallback page) answers `false`, and then nothing
+    /// is drawn -- a badge over an empty screen explains nothing.
+    fn has_layout(&self) -> bool {
+        true
+    }
 }
 
 /// The current firmware's only scene: `<top>|<bottom>`, both ASCII, both
@@ -85,6 +94,13 @@ impl Scene for Rows {
 
     fn mark_clean(&mut self) {
         self.dirty = false;
+    }
+
+    /// The bench rows are PC-supplied content, so they count: if the daemon link
+    /// dies while they are on the glass, they are stale and the badge is exactly
+    /// what SPEC 4.9 asks for. An empty buffer does not count.
+    fn has_layout(&self) -> bool {
+        self.buf[..self.len].iter().any(|&b| b != b' ')
     }
 }
 

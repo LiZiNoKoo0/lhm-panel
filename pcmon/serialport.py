@@ -97,6 +97,20 @@ class Port(object):
         timeouts = COMMTIMEOUTS(50, 0, 100, 0, 100)
         k32.SetCommTimeouts(self.handle, ctypes.byref(timeouts))
 
+    def release_board(self):
+        """Let a running app keep running after the port was opened.
+
+        Opening a COM port lets the driver assert DTR and RTS. On this board DTR
+        is IO0 and RTS is EN, so an open can silently reset the chip -- and if
+        IO0 is still low when EN rises it lands in the ROM download stub and
+        prints nothing at all. Order matters: IO0 high first, then release EN.
+
+        Found 2026-10-23: a probe that wrote a line 0.2 s after opening got no
+        answer and looked exactly like broken firmware.
+        """
+        k32.EscapeCommFunction(self.handle, CLRDTR)
+        k32.EscapeCommFunction(self.handle, CLRRTS)
+
     def reset_board(self, hold_s=0.3):
         """Restart the app: RTS is EN, DTR is IO0.
 

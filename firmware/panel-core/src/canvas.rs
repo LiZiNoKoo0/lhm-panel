@@ -49,6 +49,20 @@ impl<'a> Canvas<'a> {
         self.buf[at + 1] = (colour & 0xFF) as u8;
     }
 
+    /// One pixel, or `None` outside the canvas. Used by tests that assert *what*
+    /// was drawn rather than only that something changed; the firmware itself
+    /// is write-only.
+    pub fn get(&self, x: usize, y: usize) -> Option<u16> {
+        if x >= self.w || y >= self.h {
+            return None;
+        }
+        let at = (y * self.w + x) * 2;
+        if at + 1 >= self.buf.len() {
+            return None;
+        }
+        Some(((self.buf[at] as u16) << 8) | self.buf[at + 1] as u16)
+    }
+
     /// Fill the whole canvas. Byte order matches `put`.
     pub fn clear(&mut self, colour: u16) {
         let hi = (colour >> 8) as u8;
@@ -58,6 +72,17 @@ impl<'a> Canvas<'a> {
             self.buf[at] = hi;
             self.buf[at + 1] = lo;
             at += 2;
+        }
+    }
+
+    /// Fill a rectangle. Clipped like `put`, so a caller cannot paint outside
+    /// the panel by arithmetic (SPEC D-3). Used by the `LINK LOST` badge, whose
+    /// legibility depends on the block being solid before the text goes on it.
+    pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, colour: u16) {
+        for py in y..y.saturating_add(h) {
+            for px in x..x.saturating_add(w) {
+                self.put(px, py, colour);
+            }
         }
     }
 

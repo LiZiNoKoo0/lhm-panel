@@ -3,8 +3,7 @@ name = "st7735-text"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-# Board-independent core: canvas, glyphs, scenes, CRC, link contract.
+[dependencies]# Board-independent core: canvas, glyphs, scenes, CRC, link contract.
 # Everything in it must build and test on a PC (firmware/SPEC.md C-2).
 panel-core = { path = "../panel-core" }
 
@@ -14,13 +13,77 @@ esp-hal = { version = "=1.1.2", features = ["esp32", "unstable"] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
 
 esp-radio = { version = "0.18.0", features = ["wifi", "esp32"] }
-esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp32"] }
-esp-alloc = "0.10.0"
+esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32"] }
+esp-alloc = { version = "0.10.0", features = ["internal-heap-stats"] }
 embassy-executor = "0.10"
 embassy-time = "0.5.1"
 embassy-net = { version = "0.9.1", features = ["tcp", "dhcpv4", "dns"] }
 esp-storage = { version = "0.9.0", features = ["esp32"] }
 esp-println = { version = "0.15.0", features = ["esp32"] }
+
+# T3: the config page. 0.20.1 is the version that wants embassy-net 0.9.1 and
+# embassy-time 0.5.1 -- precisely what T1 pinned. No json/ws/tokio/std features:
+# the page is one static string plus one url-encoded form.
+picoserve = { version = "0.20.1", default-features = false, features = ["embassy", "alloc"] }
+# Only for the form struct handed to picoserve::extract::Form; alloc, never std.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# Already in Cargo.lock via embassy-net; direct because net.rs shares state with
+# the render task through a Signal.
+embassy-sync = "0.8.0"
+# A soft-AP that hands out no address is a hotspot you cannot open a page on:
+# embassy-net has a DHCP *client* only, so the server side comes from here.
+edge-dhcp = "0.8.0"
+edge-nal = "0.7.0"
+edge-nal-embassy = "0.9.0"
+heapless = "0.9"
+# Needed to name the NorFlash/ReadNorFlash traits; same 0.3.1 esp-storage uses.
+embedded-storage = "0.3.1"
+
+[features]
+# Bench-only: start the T5 daemon link against a fixed peer and queue one
+# `PING` line on connect. Used to prove the TCP byte path (connect, write,
+# read, line splitting) with a five-line Python echo server instead of the
+# daemon, so "the wire works" and "the protocol is right" are two separate
+# questions. Also supplies `board::DAEMON_PEER`; without this feature the link
+# task never starts. Never enabled in a shipped build.
+bench-echo = []
+# Bench-only switch: pretend the stored password is wrong, keeping the SSID.
+# It exists to prove the one path a user fears -- "I typed the password wrong,
+# is the board dead now?" -- without touching the credentials in flash (a test
+# that overwrites them cannot be repeated without asking the user for the real
+# password again). Build with `--features seed-bad-psk`, boot, watch the retry
+# ladder run out into the hotspot, then rebuild without it and the real record
+# is still there, untouched. Never enabled in a shipped build.
+seed-bad-psk = []
+
+# Bench-only: do one real `store.save` at boot, so the A/B sector switch is
+# exercised on the board without a phone and a web page in the loop. Expect
+# `WIFI save ok` and then `STORE ok ... slot=<the other one> seq=<+1>`.
+bench-save-on-boot = []
+
+# Bench-only: erase the target sector, write half a frame, and reset -- the
+# exact power-cut SPEC S-2 is about. The next boot MUST still load the other
+# slot and join the network it knew before.
+bench-powercut = []
+
+# Bench-only: put a T3-format (headerless) record in slot A when the board has
+# nothing framed yet, i.e. fake an upgraded board, so the migration path can be
+# exercised without asking the user for their password.
+bench-legacy = []
+
+# Bench-only: write `board::BENCH_TOKEN` into flash when no token is paired yet
+# (T5.6). The real pairing path is the config page, which needs a phone and
+# somebody typing; this makes "strict daemon accepts me" and "strict daemon
+# refuses a wrong token" reproducible from a script. Never enabled in a shipped
+# build.
+bench-seed-token = []
+
+# Bench-only: paint three full-height bars -- 0xF800 red, 0x07E0 green,
+# 0x001F blue, left to right -- then stop (never reach WiFi). MADCTL bit 3
+# (0x08) selects RGB (0) or BGR (1) on ST7735S, and white/black can't tell the
+# two apart, so this is the only honest test: the left bar IS red if the glass
+# is RGB. Sends `COLOURS ...` up the UART before halting. Never shipped.
+bench-colours = []
 
 [profile.release]
 opt-level = "s"

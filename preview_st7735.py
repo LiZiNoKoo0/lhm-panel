@@ -62,6 +62,7 @@ def to_rgb565(rgb):
 
 
 def from_rgb565(word):
+    """RGB565 word -> 8-bit channels, i.e. what an RGB-wired panel shows."""
     """Back to 8-bit per channel, the way the panel actually shows it."""
     r = (word >> 11) & 0x1F
     g = (word >> 5) & 0x3F
@@ -137,12 +138,16 @@ def render(line, fg_word, bg_word, x=2, y=None):
 LINE_YS = (20, 44)
 
 
-def render_page(lines, fg_word, bg_word, ys=LINE_YS):
+def render_page(lines, fg_word, bg_word, ys=LINE_YS, badge=False):
     """Several centred rows in one frame -- the layout the live firmware draws.
 
     Mirrors draw_row() in firmware/st7735-text/src/main.rs: each line is
     truncated to COLS characters and centred, so the PC and the glass agree
     without either side knowing what the text means.
+
+    `badge=True` adds the `LINK LOST` overlay the firmware paints when the
+    daemon link is down (SPEC 4.9). Same geometry, same order: white block
+    first, then the letters punched out in the background colour.
     """
     rows = [[bg_word] * PANEL_W for _ in range(PANEL_H)]
     for text, y in zip(lines, ys):
@@ -156,7 +161,209 @@ def render_page(lines, fg_word, bg_word, ys=LINE_YS):
             for px in range(x + start, x + start + length):
                 if 0 <= px < PANEL_W:
                     rows[py][px] = fg_word
+    if badge:
+        draw_badge(rows, fg_word, bg_word)
     return rows
+
+
+# -- boot self-test card ------------------------------------------------
+# Mirrors panel-core/src/boot.rs. Any change there must land here in the same
+# commit, or the CRC comparison stops meaning anything.
+BOOT_TITLE = "SELF TEST"
+BOOT_LABELS = ("PANEL", "STORE", "WIFI", "LINK")
+#: Step name -> the word painted on the card.
+BOOT_WORDS = {"pending": "--", "busy": "...", "ok": "ok", "fail": "fail"}
+#: Step name -> RGB565 word. Pink title, grey waiting, white done, red failed.
+BOOT_COLOURS = {
+    "pending": 0x8410,
+    "busy": 0x8410,
+    "ok": 0xFFFF,
+    "fail": 0xF800,
+}
+BOOT_TITLE_COLOUR = 0xFDB8
+
+
+def text_cells(rows, text, x, y, colour):
+    """Draw one cell-aligned run at (x, y), clipped like the firmware's canvas."""
+    for row, start, length in ink_runs(text):
+        py = y + row
+        if not (0 <= py < PANEL_H):
+            continue
+        for px in range(x + start, x + start + length):
+            if 0 <= px < PANEL_W:
+                rows[py][px] = colour
+    return rows
+
+
+def boot_page(steps=("ok", "ok", "ok", "ok")):
+    """The boot card for a given set of step states, top to bottom.
+
+    Five rows of 16px fill the 80px panel exactly: one title, four steps.
+    """
+    rows = [[0x0000] * PANEL_W for _ in range(PANEL_H)]
+    width = len(BOOT_TITLE) * font.CELL_W
+    text_cells(rows, BOOT_TITLE, (PANEL_W - width) // 2, 0, BOOT_TITLE_COLOUR)
+    for index, step in enumerate(steps):
+        y = (index + 1) * font.CELL_H
+        colour = BOOT_COLOURS[step]
+        text_cells(rows, BOOT_LABELS[index], font.CELL_W, y, colour)
+        word = BOOT_WORDS[step]
+        x = (COLS - len(word)) * font.CELL_W
+        text_cells(rows, word, x, y, colour)
+    return rows
+
+
+# -- LINK LOST badge ----------------------------------------------------
+#: Nine cells of 8px, bottom-right, flush with the corner (firmware badge.rs).
+BADGE_TEXT = "LINK LOST"
+BADGE_W = len(BADGE_TEXT) * font.CELL_W
+BADGE_H = font.CELL_H
+BADGE_X = PANEL_W - BADGE_W
+BADGE_Y = PANEL_H - BADGE_H
+
+
+def draw_badge(rows, fg_word, bg_word):
+    """White block, letters in the background colour -- inverted on purpose.
+
+    The body of the panel is white-on-black, so a normal white line down here
+    would be read as a value instead of an annotation.
+    """
+    if BADGE_W > PANEL_W or BADGE_H > PANEL_H:
+        return rows
+    for py in range(BADGE_Y, BADGE_Y + BADGE_H):
+        for px in range(BADGE_X, BADGE_X + BADGE_W):
+            rows[py][px] = fg_word
+    for row, start, length in ink_runs(BADGE_TEXT):
+        py = BADGE_Y + row
+        for px in range(BADGE_X + start, BADGE_X + start + length):
+            if 0 <= px < PANEL_W and 0 <= py < PANEL_H:
+                rows[py][px] = bg_word
+    return rows
+
+
+# -- ui pages -----------------------------------------------------------
+# Mirrors panel-core/src/ui.rs. Every rule below (rounding, insetting a
+# bordered rect, the `--` for a null reading) has a twin in Rust; if the two
+# drift, `check_parity.py --ui` stops matching and that is the point.
+
+def colour565(text):
+    """'#RRGGBB' -> RGB565, exactly like ui::colour (six hex digits required)."""
+    if not isinstance(text, str) or len(text) != 7 or text[0] != "#":
+        raise ValueError("colour must be #RRGGBB, got %r" % (text,))
+    try:
+        value = int(text[1:], 16)
+    except ValueError:
+        raise ValueError("colour must be hex, got %r" % (text,))
+    return to_rgb565(((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF))
+
+
+def format_number(value, dec=0, unit=""):
+    """The `num` node text: `--` when there is no reading, else dec+unit.
+
+    Integer arithmetic on purpose, same as the firmware: f64 formatting would
+    pull core::fmt's float machinery into a 4 MB flash budget.
+    """
+    if value is None:
+        return "--"
+    dec = max(0, min(3, int(dec)))
+    scale = (1, 10, 100, 1000)[dec]
+    raw = float(value) * scale
+    if raw != raw or raw in (float("inf"), float("-inf")):
+        rounded = 0
+    else:
+        # Rust: (v + 0.5) as i64 for v >= 0, (v - 0.5) as i64 otherwise, and
+        # `as` truncates toward zero -- int() in Python does the same.
+        rounded = int(raw + 0.5) if raw >= 0 else int(raw - 0.5)
+    rounded = max(-999999999, min(999999999, rounded))
+    digits = str(abs(rounded))
+    out = "-" if rounded < 0 else ""
+    if dec == 0:
+        out += digits
+    elif len(digits) <= dec:
+        out += "0." + "0" * (dec - len(digits)) + digits
+    else:
+        split = len(digits) - dec
+        out += digits[:split] + "." + digits[split:]
+    return out + (unit or "")
+
+
+def fill_rect(rows, x, y, w, h, word):
+    """Clipped fill -- off-panel coordinates are legal, not an error."""
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(PANEL_W, x + w), min(PANEL_H, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return rows
+    for py in range(y0, y1):
+        row = rows[py]
+        for px in range(x0, x1):
+            row[px] = word
+    return rows
+
+
+def ui_page(layout, values=None, badge=False):
+    """Render a `ui` message (plus the latest `data`) to a 160x80 framebuffer.
+
+    `layout` is the decoded JSON object, `values` the metric table the way it
+    stands after `data` messages have been applied (PROTOCOL 9: a missing key
+    keeps its old value, an explicit null prints `--`).
+
+    `badge=True` adds the `LINK LOST` overlay the firmware paints on top of
+    whatever page it holds when the link drops -- needed whenever a fixture is
+    fed over UART with the daemon stopped, because in that state the board
+    really does paint the badge over the page it just received.
+    """
+    values = values or {}
+    bg = colour565(layout.get("bg", "#000000"))
+    rows = [[bg] * PANEL_W for _ in range(PANEL_H)]
+    for node in layout.get("nodes", []):
+        kind = node.get("type")
+        x = int(node.get("x", 0))
+        y = int(node.get("y", 0))
+        if kind == "rect":
+            w = int(node.get("w", 0))
+            h = int(node.get("h", 0))
+            inside = node.get("fill")
+            border = node.get("color")
+            if inside is None and border is None:
+                continue
+            inner = colour565(inside if inside is not None else border)
+            if border is not None and inside is not None:
+                fill_rect(rows, x, y, w, h, colour565(border))
+                if w > 2 and h > 2:
+                    fill_rect(rows, x + 1, y + 1, w - 2, h - 2, inner)
+            else:
+                fill_rect(rows, x, y, w, h, inner)
+        elif kind == "text":
+            if x < 0 or y < 0:
+                continue
+            word = colour565(node["color"]) if "color" in node else 0xFFFF
+            text_cells(rows, node.get("text", ""), x, y, word)
+        elif kind == "num":
+            if x < 0 or y < 0:
+                continue
+            word = colour565(node["color"]) if "color" in node else 0xFFFF
+            text = format_number(values.get(node.get("bind", "")), node.get("dec", 0), node.get("unit", ""))
+            text_cells(rows, text, x, y, word)
+        # `path`/`line`/`bar` are refused by the firmware whole; skipping them
+        # here would silently draw a page that the board will never show.
+        else:
+            raise ValueError("unsupported node type %r" % (kind,))
+    if badge:
+        # White block, letters in the page background colour -- same inverted
+        # shape as `panel-core/src/badge.rs`.
+        draw_badge(rows, 0xFFFF, bg)
+    return rows
+
+
+def apply_data(values, message):
+    """Fold one `data` message into the value table, PROTOCOL 9 rules."""
+    values = dict(values or {})
+    for key, raw in (message.get("v") or {}).items():
+        if raw is None:
+            values[key] = None
+        elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            values[key] = float(raw)
+    return values
 
 
 def to_bytes(rows, big_endian=True):
@@ -168,12 +375,28 @@ def to_bytes(rows, big_endian=True):
     return bytes(out)
 
 
+#: This module's glass is wired BGR (firmware/st7735-text/src/board.rs: MADCTL
+#: 0x68, measured 2026-10-23 with the `bench-colours` three-bar test -- sending
+#: 0xF800 lit blue). The *frame bytes* and every CRC are unaffected by that; only
+#: what the eye sees is, so every picture this preview paints swaps red and blue
+#: to match the glass. Set to False for an RGB-wired module.
+GLASS_BGR = True
+
+
+def glass_rgb(word):
+    """The colour the eye sees for an RGB565 word on a BGR-wired panel."""
+    r, g, b = from_rgb565(word)
+    if GLASS_BGR:
+        r, b = b, r
+    return (r, g, b)
+
+
 def to_ppm(rows):
     """A 1:1 PPM (P6) for eyeballing or diffing outside this window."""
     out = bytearray(b"P6\n%d %d\n255\n" % (PANEL_W, PANEL_H))
     for row in rows:
         for word in row:
-            out += bytes(from_rgb565(word))
+            out += bytes(glass_rgb(word))
     return bytes(out)
 
 
@@ -197,7 +420,7 @@ def draw(canvas, rows, zoom, bezel=6):
                 x += 1
             colour = cache.get(word)
             if colour is None:
-                r, g, b = from_rgb565(word)
+                r, g, b = glass_rgb(word)
                 colour = "#%02x%02x%02x" % (r, g, b)
                 cache[word] = colour
             canvas.create_rectangle(bezel + start * zoom, bezel + y * zoom,
