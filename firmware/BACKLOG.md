@@ -32,7 +32,7 @@
 | T5 | TCP 链路 + `hello` + 断线退避 | DONE(T5.1–T5.6 全部) |
 | T6a | `ui` 节点解析(`rect`/`text`/`num`) | DONE |
 | T6b | `data` 值更新 + 真页面上屏 | DONE(整帧推屏,脏矩形仍未做) |
-| T6c | **布局二进制存 flash**(SPEC §6,`ver`+CRC) | **TODO** ← 见上方警告 |
+| T6c | **布局二进制存 flash**(SPEC §6,`ver`+CRC) | **DONE**(保存侧已上芯验证;恢复侧待玻璃确认) |
 | T6d | focus 表(项数 + x/y/w/h,序号 **1 基**) | TODO |
 | T7 | `line` 折线 + 脏矩形推屏 | TODO |
 | 9.1 | 数据超时置 `--`(`interval_ms`×3) | DONE(2026-10-25 上板) |
@@ -1062,6 +1062,69 @@ UI PARITY OK (crc=0x0E85F74A, 25600 bytes, 4 frames, 2 matched)
 **WIFI 那行不是故障**：`WIFI fail reason=Disconnected(AuthenticationExpired)`
 在每次 boot 都会出现一次，后面紧跟 `BOOT WIFI ok` —— 是第一次关联被 AP 拒、
 重连成功，属正常路径。
+## T6c 结果：布局存 flash（2026-10-25，保存侧已证实 / 恢复侧未验）
+
+**目标**：断电重开，屏上还是上次那一页，值全是 `--`。
+这是 PROTOCOL §22「玻璃 = 持久布局 + 易失值」里那个「持久」——之前完全不存在。
+
+### 已做
+
+| 位置 | 内容 |
+|---|---|
+| `panel-core/src/saved.rs`（新） | 布局 ↔ 二进制的紧凑编解码，8 项测试 |
+| `panel-core/src/ui.rs` | `Layout::from_parts`、`Page::adopt`、`Id::raw/len/from_raw` |
+| `st7735-text/src/store.rs` | A/B 机制按基址参数化，凭据与布局共用一套写入校验 |
+| `st7735-text/src/main.rs` | 启动读回并 adopt；`ver` 变化时保存 |
+| `st7735-text/src/board.rs` | `LAYOUT_SECTOR = 0xB000`（紧接凭据那对） |
+
+### 两个设计决定
+
+1. **不存 `interval_ms`**。它是 `catalog` 的属性，不是页面的。开机没有 catalog，
+   留 0 = 「永不过期」，而值表本来就是空的，每个 `num` 都画 `--` —— 正好是
+   §22.3 说的「没 PC 时的样子」。
+2. **固定长度记录放不下**。每个节点约 59 B，32 个就是 1888 B，超过扇区 1024 B 的
+   payload 上限。按 kind 裁剪字段后最坏情况 1008 B。
+
+### 已验证（从芯片回读，不看日志）
+
+```
+0xB000: seq=109  page ver=16 scene=0 bg=0x00C6 nodes=2
+0xC000: seq=110  page ver=16 scene=0 bg=0x00C6 nodes=2
+```
+
+与应用的页面逐项一致（`#001a33` → RGB565 `0x00C6`，2 节点，ver=16）；
+A/B 双备份都完整，`seq` 递增说明写的是非活动扇区再切换。
+
+工具：`tools/check_flash_layout.py`（解析 `espflash read-flash` 的转储）
+
+### 未验：恢复侧
+
+`PAGE restored` 在 `ui_task` 里打印，而这台板子的 **CH343 在 WiFi 电流尖峰时
+整块掉出设备树**，那行日志到不了主机。需要看玻璃确认（期望：青色大字 `T6C`
++ CPU 显示 `--`），或换一块串口能撑过启动的板子。
+
+### ⚠️ 新债：主任务栈 27540 → 23396 B
+
+保存路径上的三个栈缓冲（`LAYOUT_SLOT_BYTES` 1040 ×2 + `saved::MAX_LEN` 1024）
+吃掉了 4144 字节。**23 KB 仍然够用**，但这是 B-1 那条教训的地盘：
+静态/栈内存的增长要记账。真要省，可以把缓冲区挪成 `static mut` 单例
+（代价是 .bss 上涨，同样从栈里扣，但只扣一份而不是两层嵌套各一份）。
+
+### 观察方法论（第三次踩同一个坑）
+
+`PAGE saved` / `PAGE restored` 这类运行期日志**在串口上根本观测不到**，
+因为端口在 WiFi 启动那一下就没了。这一晚第六、七次把「没看到日志」当成
+「功能没生效」。
+
+能用的取证通道，按可靠性排序：
+
+1. **flash 回读**（`espflash read-flash` + 解析）—— 证明写进去的是什么
+2. **玻璃**（人眼）—— 证明画出来的是什么
+3. `cargo test` —— 证明纯逻辑
+4. 串口 —— **只在 WiFi 起来之前，或串口能撑过启动时**才可信
+
+新增 `tools/serial_tolerant.py`：跨掉线重试的读取器，原 `pan.ps1` 一遇断开就退出。
+
 ## T6c 结果：数据超时置 `--`（2026-10-25 05:56，已验证上板）
 
 **PROTOCOL 9.1 在玻璃上跑通了。** 三个阶段的证据都是终端+串口双确认：
