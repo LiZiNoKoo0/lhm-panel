@@ -270,7 +270,7 @@ powershell -ExecutionPolicy Bypass -File H:\newwork\firmware\flash.ps1
 | 多字号 16/32/48（单字模整数倍放大） | 2026-10-25 | `hello ... fonts=16,32,48`；屏上三行明显不同大小 |
 | PC 端布局编辑器（配置 → 应用 → 上屏） | 2026-10-25 | `apply from webui: ver=N -> broadcast` + 板子画面改变 |
 
-### 下一张卡：**T6c 布局二进制存 flash**（SPEC §6，S-6）
+### T6c 布局二进制存 flash（SPEC §6，S-6）——**已完成 2026-10-25**
 
 **这是当前最大的缺口，而且之前的进度记录把它漏掉了。**
 
@@ -291,7 +291,7 @@ powershell -ExecutionPolicy Bypass -File H:\newwork\firmware\flash.ps1
 
 > 排期理由：TLV 存储先于 T6 的其余部分，否则 L4 要再迁移一次格式。
 
-### T6d · focus 表（按键导航的前提）
+### 下一张卡：**T6d focus 表**（按键导航的前提）
 
 项数 + 每项 `x/y/w/h`，**序号 1 基**，≤32 项。
 原因：按键导航必须有**看得见**的高亮框；没有它，按了键屏上没变化、串口却一切正常。
