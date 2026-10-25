@@ -229,20 +229,24 @@ function editorSmallButton(label, onClick) {
  * a named field, so showing a control the server would reject would just be a
  * slower way to fail.
  */
-/**
- * Font sizes the firmware can actually draw.
+/** Font sizes the firmware can actually draw, shown to the operator as a scale.
  *
- * The panel declares `fonts:[16]` in its hello (panel-core/src/wire.rs) and has
- * exactly one 8x16 glyph table, so every other size is silently rewritten by
- * `fit_nodes` before the frame leaves the daemon. A free-text size box is
-therefore a control that cannot work: the operator types 28, the daemon sends
- * 16, and the screen does not change. Greying it out and saying why is the
- * honest version.
+ * The panel has one 8x16 glyph table (firmware/panel-core/src/font8x16.rs) and
+ * draws 32/48 by integer magnification of that same table, so the wire value is
+ * a pixel height while the thing a human thinks about is "how many times bigger
+ * than normal". Both are kept below: PANEL_FONTS is what goes on the wire
+ * (PROTOCOL 7 `size`), FONT_SCALES maps it to the label in the dropdown.
  *
- * Read from the panel's declaration rather than hard-coded, so the day the
- * firmware grows a second font this stops lying on its own.
+ * A free-text size box cannot work: anything not in this list is silently
+ * rewritten by `fit_nodes` before the frame leaves the daemon, so the operator
+ * types 28, the daemon sends 16, and nothing on the glass changes.
+ *
+ * Keep in step with FONT_SIZES in firmware/panel-core/src/ui.rs.
  */
-const PANEL_FONTS = [16];
+const PANEL_FONTS = [16, 32, 48];
+
+/** Wire size -> the multiplier label shown in the editor. */
+const FONT_SCALES = {16: '1x', 32: '2x', 48: '3x'};
 
 function editorNodeFields(node) {
   const common = ['x', 'y'];
@@ -284,17 +288,29 @@ function editorField(node, index, field) {
       label.appendChild(fixedBox);
       return label;
     }
-    // More than one real size: fall through to a select so the value can only
-    // be one the terminal promised to draw.
+    // More than one real size: a select, so the value can only be one the
+    // terminal promised to draw. Labelled as a multiplier (1x/2x/3x) rather
+    // than as pixels: "32" means nothing to an operator looking at a 160x80
+    // panel, "2x" says how much bigger than normal this will be.
     label.textContent = EDITOR_FIELD_HINTS[field] || field;
     const pick = document.createElement('select');
     pick.className = 'text-xs px-1.5 py-1 rounded border border-gray-200 bg-white font-mono';
     for (const size of PANEL_FONTS) {
       const option = document.createElement('option');
       option.value = String(size);
-      option.textContent = String(size);
+      option.textContent = FONT_SCALES[size] || String(size);
       if (Number(node[field]) === size) option.selected = true;
       pick.appendChild(option);
+    }
+    // A node that predates this field (or came from a hand-edited file) may
+    // carry a size that is not in the list; show it so the operator can see
+    // what the firmware will snap it to instead of silently changing it.
+    if (node[field] !== undefined && PANEL_FONTS.indexOf(Number(node[field])) < 0) {
+      const odd = document.createElement('option');
+      odd.value = String(node[field]);
+      odd.textContent = String(node[field]) + '（会被改成 ' + (FONT_SCALES[16] || '1x') + '）';
+      odd.selected = true;
+      pick.appendChild(odd);
     }
     pick.addEventListener('change', () => editorSetField(index, field, pick.value));
     label.appendChild(pick);
@@ -332,8 +348,18 @@ function editorField(node, index, field) {
     swatch.className = 'editor-swatch';
     swatch.value = editorNormaliseColour(value);
     swatch.title = '选色';
+    // Live dragging must not re-render the list: the picker is a native popup
+    // that only survives while its element does, and renderEditor rebuilds every
+    // node row. Writing straight into the draft keeps the preview and the hex
+    // box in step while the popup stays open; the full re-render waits for
+    // change, which fires when the picker closes.
     swatch.addEventListener('input', () => {
       input.value = swatch.value;
+      const scene = editorDraftScene();
+      if (scene && scene.nodes[index]) scene.nodes[index][field] = swatch.value;
+      drawEditorPreview();
+    });
+    swatch.addEventListener('change', () => {
       editorSetField(index, field, swatch.value);
     });
     row.appendChild(swatch);
