@@ -12,9 +12,9 @@
 |---|---|---|---|
 | M1 | `pcmon/protocol.py` | ✅ 完成 | `python -m pcmon.protocol` → `ALL OK`（10/10 用例） |
 | M2 | `fake_daemon.py` | ✅ 完成 | 一直在跑；板子/桌面/网页三种终端同时接入 |
-| M3 | `term_tk.py` | ✅ 完成 | 文件在（51 KB），本次会话未重新验收 |
-| M4 | `replay.py` | ⚠️ 完成未验 | 文件在（44 KB）；回放一致性未在本次会话验证 |
-| M5 | `pcmon/lhm.py` + `--source lhm` | ✅ 采集可用 / ⚠️ 桥接掉线未验 | 真实 CPU/温度正常上屏；**「杀掉桥接 3 秒内变 `--`」没验过** |
+| M3 | `term_tk.py` | ✅ 完成 | `--selftest` 22 项全过（2026-10-25） |
+| M4 | `replay.py` | ✅ 完成 | 探针抓帧逐帧比对 60/60 相同 → `PARITY OK`（2026-10-25） |
+| M5 | `pcmon/lhm.py` + `--source lhm` | ✅ 完成 | 真采集上屏；杀桥接 → **0.3 秒**变 `null`，自动重启恢复（2026-10-25） |
 | P1 | `preview_st7735.py` | ✅ 完成 | 与固件逐字节 parity 已钉进 `panel-core/tests/parity.rs` |
 | P2 | `pcmon/webui.py` + `webstatic/` | ✅ 完成（含新增编辑器） | 布局编辑器端到端上板验证（2026-10-25） |
 | — | `pcmon/layouts.py`（新增） | ✅ 完成 | 已应用布局持久化；`ver` 只在 apply 时 +1 |
@@ -22,12 +22,51 @@
 **验收状态必须如实区分**：「✅ 完成」= 本次会话跑过并能复现；「⚠️ 完成未验」= 代码在，但验收项没跑。
 不要把「文件存在」当成「验收通过」——上一版 `HANDOVER` 就因此写着 T6a 未接线。
 
-### 还欠的验收
+### 三项验收结果（2026-10-25 10:17，全部通过）
 
-1. **M4 回放一致性**：录一段 → `replay.py` 回放 → 画面与实时一致。
-2. **M5 桥接掉线**：杀掉 `lhm_bridge.exe`，3 秒内数值应变 `--`（`pcmon/lhm.py` 的 `STALE_AFTER_S = 3.0`）。
-   注意这与「daemon 断开」是两条不同路径：daemon 断开是设备端超时，桥接断开是 PC 端发 `null`。
-3. **M3 桌面终端**：本次会话没跑过，`term_tk.py` 与新布局的兼容性未知。
+| 项 | 结果 | 证据 |
+|---|---|---|
+| **M3** 桌面终端 | ✅ **PASS** | `term_tk.py --selftest` → `SELFTEST PASS (22 checks, 0 failed)`，1.4 s |
+| **M4** 回放一致性 | ✅ **PASS** | `tools/check_replay_parity.py` → `PARITY OK`，逐帧比对 60/60 完全相同（除 `s` 序号） |
+| **M5** 桥接掉线 | ✅ **PASS** | 杀 `lhm_bridge.exe` → **0.3 秒**全部 6 个值变 `null`（要求 3 秒内）；桥接自动重启 → `live=6` 恢复 |
+
+#### M3 的注意事项（下次别再踩）
+
+`term_tk.py --selftest` 是拿**当前生效的布局**做断言的。我先应用过一个「FONT TEST」页面
+（3 个 text 节点、故意让 32/48 号字重叠），自检立刻报了 3 项失败：
+
+```
+FAILED no_text_overlap: overlaps=[('B32', 'C48')]
+FAILED num_updated: num texts=[]
+FAILED bind_w_scaled: rects=0
+```
+
+**那不是 term_tk 的 bug，是测试环境被污染。** 把 `layouts/applied.json` 移开、跑在内置布局上，
+22 项全过。以后跑这个自检前先确认没有自定义布局生效。
+
+#### M4 的两次错误方法（值得记住）
+
+1. **解析回放器的日志而不是线上的字节**。日志把每个说过 hello 的客户端都混在一起，
+   板子中途重连看起来就像「帧顺序错乱」——错的其实是我的解析器。
+2. **用字节数当证据**。两个不同的帧可以长度相同，只有内容能证明一致。
+
+现在的做法：一个探针连一次、抓自己那份原始字节，规范化 JSON（忽略字段顺序和 `s`）后逐帧比。
+**时间不参与比较**——`--speed` 存在的意义就是改时间。
+
+#### M5 的测量方式
+
+用 `tools/watch_nulls.py` 直接看线上 `data` 帧，不看界面：
+
+```
+t= 28.3s  live=6  null=0   cpu.temp=38.0, cpu.total=58.98 ...
+t= 29.3s  live=0  null=6                        ← 桥接被杀后 0.3 秒
+```
+
+daemon 日志同一时刻：`[10:11:03] lhm bridge restart in 1s (attempt 1)`。
+之后桥接自动重启（新 pid），值恢复 `live=6`。
+
+> `null` 与「省略 key」是两件事（PROTOCOL 9）：省略会让屏上保留旧值，`null` 才会变 `--`。
+> 这条验证的正是 daemon 发的是 `null`。
 
 ---
 
