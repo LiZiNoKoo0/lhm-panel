@@ -380,6 +380,32 @@ pub fn link_tx(t: &mut dyn Transport, bytes: &[u8]) {
 /// Separated from `LINK tx` because SPEC L-3 says hello is re-sent on every
 /// reconnect: this line is what makes "did it really?" checkable in a log with
 /// five reconnects in it.
+/// `LINK challenge\n` -- the daemon wants proof that we hold the key (s.2.1).
+///
+/// No fields on purpose: the nonce is 32 hex characters nobody reads by eye,
+/// and a value that only ever needs to be *used* does not belong in a log. What
+/// an operator needs to know is "the challenge arrived", and that is this line.
+pub fn link_challenge(t: &mut dyn Transport) {
+    let _ = t.write_all(b"LINK challenge\n");
+}
+
+/// `LINK auth tx n=<bytes>` -- our answer is on the wire.
+pub fn link_auth_tx(t: &mut dyn Transport, bytes: usize) {
+    let mut line = [0u8; 40];
+    let mut at = put(&mut line, b"LINK auth tx n=");
+    at += put_dec(&mut line[at..], bytes as u32);
+    at += put(&mut line[at..], b"\n");
+    let _ = t.write_all(&line[..at]);
+}
+
+/// `LINK srv bad` -- the daemon failed to prove *it* holds the key.
+///
+/// The link is dropped at this point: answering would hand a valid mac to an
+/// impostor, which is precisely what the daemon's own proof exists to prevent.
+pub fn link_srv_bad(t: &mut dyn Transport) {
+    let _ = t.write_all(b"LINK srv bad\n");
+}
+
 pub fn link_hello_tx(t: &mut dyn Transport, bytes: usize) {
     let mut line = [0u8; 48];
     let mut at = put(&mut line, b"LINK hello tx n=");

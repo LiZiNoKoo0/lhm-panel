@@ -10,6 +10,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod auth;
 pub mod badge;
 pub mod boot;
 pub mod canvas;
@@ -23,5 +24,6 @@ pub mod saved;
 pub mod scene;
 pub mod sector;
 pub mod session;
+pub mod sha256;
 pub mod ui;
 pub mod wire;

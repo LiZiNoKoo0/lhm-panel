@@ -34,6 +34,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use panel_core::boot::{self, Step};
 use panel_core::discover;
 use panel_core::link::{LineBuf, LinkError, Transport};
+use panel_core::auth;
 use panel_core::session::{self, Session};
 use panel_core::wire::{self, LINE_CAP};
 
@@ -230,13 +231,13 @@ pub async fn pump(stack: Stack<'static>, initial: Option<([u8; 4], u16)>, token:
                 // itself, and the silence would look like a dead wire.
                 let action = session.connected(now_ms());
                 let hello_ok = if SEND_HELLO && action == session::Action::SendHello {
-                    send_hello(&mut socket, token).await
+                    send_hello(&mut socket).await
                 } else {
                     true
                 };
 
                 if hello_ok {
-                    ended = Some(serve(&mut socket, &mut session).await);
+                    ended = Some(serve(&mut socket, &mut session, token).await);
                 } else {
                     fail_reason = Some("WriteFailed");
                     ended = Some(End::PeerClosed);
@@ -349,28 +350,19 @@ fn now_ms() -> u32 {
 
 /// Send `hello` + `\n` and say so. `false` means the socket died mid-write.
 ///
-/// The token comes from flash (T5.6). It is `&'static str` because the caller
-/// leaks it once at boot: the alternative is a mutex locked on every reconnect,
-/// and this task writes `hello` with nothing else to do.
-async fn send_hello(socket: &mut TcpSocket<'_>, token: &str) -> bool {
-    // Head, token, tail are written as three runs instead of one concatenated
-    // buffer: a 1 KB local here would live on the main stack, and on this chip
-    // stack is the scarcest resource there is (B-1). `hello_into` exists for the
-    // tests and any future caller that *does* have a buffer to spare.
-    let head = wire::HELLO_HEAD.as_bytes();
-    let tail = wire::HELLO_TAIL.as_bytes();
-    let len = head.len() + token.len() + tail.len() + 1;
-    if !write_out(socket, head).await
-        || !write_out(socket, token.as_bytes()).await
-        || !write_out(socket, tail).await
-        || !write_out(socket, b"\n").await
-    {
+/// v0.6: one static string. The old build wrote head + token + tail in three
+/// runs to keep a 1 KB buffer off the stack; with no key in `hello` there is
+/// nothing to interpolate, so a single `write_out` of a `const` is both
+/// shorter and cheaper. The key stays in flash and only ever appears as a mac.
+async fn send_hello(socket: &mut TcpSocket<'_>) -> bool {
+    let bytes = wire::HELLO.as_bytes();
+    if !write_out(socket, bytes).await || !write_out(socket, b"\n").await {
         return false;
     }
     if socket.flush().await.is_err() {
         return false;
     }
-    diag::link_hello_tx(&mut ChanLog::new(), len);
+    diag::link_hello_tx(&mut ChanLog::new(), bytes.len() + 1);
     true
 }
 
@@ -401,7 +393,7 @@ enum End {
 }
 
 /// Move bytes until the connection dies, asking the session what each line was.
-async fn serve(socket: &mut TcpSocket<'_>, session: &mut Session) -> End {
+async fn serve(socket: &mut TcpSocket<'_>, session: &mut Session, key: &str) -> End {
     let mut lines: LineBuf<LINE_CAP> = LineBuf::new();
     let mut buf = [0u8; 256];
     // How many unknown kinds were printed *on this connection*. The session
@@ -428,9 +420,17 @@ async fn serve(socket: &mut TcpSocket<'_>, session: &mut Session) -> End {
                 for &byte in &buf[..n] {
                     if let Some(len) = lines.push(byte) {
                         let line = lines.line(len);
-                        match handle_line(line, session, &mut unknown_logged) {
+                        // Ask the session what this line is *once*, then act on
+                        // the answer. Two calls would count the line twice.
+                        let what = session.line(line, now_ms());
+                        match handle_line(line, what, session, &mut unknown_logged) {
                             Handled::Ok => {}
                             Handled::Denied => return End::Denied,
+                            Handled::Answer => {
+                                if !answer_challenge(socket, key, line).await {
+                                    return End::PeerClosed;
+                                }
+                            }
                         }
                     }
                 }
@@ -451,6 +451,8 @@ async fn serve(socket: &mut TcpSocket<'_>, session: &mut Session) -> End {
 enum Handled {
     Ok,
     Denied,
+    /// The line was a `challenge`: the caller must send `auth`.
+    Answer,
 }
 
 /// One line off the wire: let the session classify it, then say the one line
@@ -458,8 +460,19 @@ enum Handled {
 ///
 /// The split matters: this function decides what to *say* about a message and
 /// never what to do with it. T6 owns the doing.
-fn handle_line(line: &[u8], session: &mut Session, unknown_logged: &mut u32) -> Handled {
-    match session.line(line, now_ms()) {
+fn handle_line(
+    line: &[u8],
+    what: session::Line,
+    session: &mut Session,
+    unknown_logged: &mut u32,
+) -> Handled {
+    match what {
+        session::Line::Challenge => {
+            // Answered by the caller, which owns the socket and the key. The
+            // session already moved to `Challenged`, so this is only the log.
+            diag::link_challenge(&mut ChanLog::new());
+            return Handled::Answer;
+        }
         session::Line::Denied => {
             // Printed before returning: the daemon closes the socket right after
             // a deny, and the reason is the only thing that says why.
@@ -506,6 +519,73 @@ fn handle_line(line: &[u8], session: &mut Session, unknown_logged: &mut u32) -> 
 
     forward(line);
     Handled::Ok
+}
+
+/// Answer the daemon's nonce, or drop the link trying (PROTOCOL.md s.2.1).
+///
+/// Order is deliberate: check the daemon's own proof **first**. If `srv` does
+/// not verify, the thing on the other end does not hold the key, so sending a
+/// valid mac would be handing an impostor exactly what it came for. Drop the
+/// link instead; the backoff ladder will retry.
+///
+/// `false` means the socket died, not "the daemon lied" -- a liar is handled by
+/// closing, which the caller turns into `End::PeerClosed`.
+async fn answer_challenge(socket: &mut TcpSocket<'_>, key: &str, line: &[u8]) -> bool {
+    let nonce_raw = match wire::str_field(line, b"nonce") {
+        Some(bytes) => bytes,
+        None => {
+            diag::link_srv_bad(&mut ChanLog::new());
+            return false;
+        }
+    };
+    let nonce = match core::str::from_utf8(nonce_raw) {
+        Ok(text) => text,
+        Err(_) => {
+            diag::link_srv_bad(&mut ChanLog::new());
+            return false;
+        }
+    };
+
+    // A daemon that omits `srv` cannot be verified. v0.6 daemons always send it;
+    // a daemon that does not is either old or lying, and this firmware has no
+    // way to tell the difference, so it refuses to authenticate blind.
+    let srv_raw = match wire::str_field(line, b"srv") {
+        Some(bytes) => bytes,
+        None => {
+            diag::link_srv_bad(&mut ChanLog::new());
+            return false;
+        }
+    };
+    let srv = match core::str::from_utf8(srv_raw) {
+        Ok(text) => text,
+        Err(_) => {
+            diag::link_srv_bad(&mut ChanLog::new());
+            return false;
+        }
+    };
+    if !auth::verify_srv(key, nonce, srv) {
+        diag::link_srv_bad(&mut ChanLog::new());
+        return false;
+    }
+
+    let mut mac = [0u8; auth::MAC_HEX];
+    if !auth::mac_into(key, nonce, wire::CLIENT_ID, &mut mac) {
+        diag::link_srv_bad(&mut ChanLog::new());
+        return false;
+    }
+    let mut out = [0u8; auth::AUTH_LINE_CAP];
+    let len = match auth::auth_into(&mac, &mut out) {
+        Some(len) => len,
+        None => return false,
+    };
+    if !write_out(socket, &out[..len]).await || !write_out(socket, b"\n").await {
+        return false;
+    }
+    if socket.flush().await.is_err() {
+        return false;
+    }
+    diag::link_auth_tx(&mut ChanLog::new(), len + 1);
+    true
 }
 
 /// Hand one line to the render task, dropping it if nobody is draining.

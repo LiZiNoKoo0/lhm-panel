@@ -32,7 +32,7 @@
 ///
 /// Field order follows SPEC 5.1 so the two can be diffed by eye.
 pub const HELLO: &str = concat!(
-    "{\"t\":\"hello\",\"proto\":1,\"token\":\"\",",
+    "{\"t\":\"hello\",\"proto\":1,\"auth\":[\"hmac-sha256/128\"],",
     "\"client_id\":\"st7735-160x80\",\"role\":\"thin\",",
     "\"accept\":[\"ui\",\"data\"],",
     "\"display\":{\"w\":160,\"h\":80,\"depth\":16},",
@@ -47,42 +47,14 @@ pub const HELLO: &str = concat!(
     "\"limits\":{\"max_nodes\":32,\"max_json_bytes\":1024,\"max_text_len\":20}}"
 );
 
-/// `hello` split around the token value, so T5.6 can substitute the stored
-/// token at runtime without `format!` (no alloc on this path) and without a
-/// second copy of the field list that could silently drift from `HELLO`.
+/// The `client_id` this board puts in `hello` **and** signs into every mac.
 ///
-/// `hello_into("")` must equal `HELLO` byte for byte -- a test enforces it, so
-/// the two definitions cannot disagree.
-pub const HELLO_HEAD: &str = "{\"t\":\"hello\",\"proto\":1,\"token\":\"";
-pub const HELLO_TAIL: &str = concat!(
-    "\",",
-    "\"client_id\":\"st7735-160x80\",\"role\":\"thin\",",
-    "\"accept\":[\"ui\",\"data\"],",
-    "\"display\":{\"w\":160,\"h\":80,\"depth\":16},",
-    "\"charset\":\"ascii\",",
-    "\"primitives\":[\"rect\",\"text\",\"num\"],",
-    "\"fonts\":[16,32,48],",
-    "\"input\":[\"key\"],",
-    "\"limits\":{\"max_nodes\":32,\"max_json_bytes\":1024,\"max_text_len\":20}}"
-);
-
-/// Write `hello` carrying `token` into `out`; returns its length.
-///
-/// `None` only if `out` is too small -- the caller sizes the buffer from
-/// `HELLO_HEAD.len() + creds::TOKEN_MAX + HELLO_TAIL.len()`.
-pub fn hello_into(token: &str, out: &mut [u8]) -> Option<usize> {
-    let t = token.as_bytes();
-    let total = HELLO_HEAD.len() + t.len() + HELLO_TAIL.len();
-    if out.len() < total {
-        return None;
-    }
-    out[..HELLO_HEAD.len()].copy_from_slice(HELLO_HEAD.as_bytes());
-    let mut at = HELLO_HEAD.len();
-    out[at..at + t.len()].copy_from_slice(t);
-    at += t.len();
-    out[at..at + HELLO_TAIL.len()].copy_from_slice(HELLO_TAIL.as_bytes());
-    Some(total)
-}
+/// PROTOCOL s.2.1 puts `client_id` inside the MAC input, so an answer captured
+/// on one connection cannot be replayed under another device's name. It has to
+/// match the string inside `HELLO` byte for byte, and the two live in different
+/// literals -- a test enforces the match, because a silent drift would look
+/// exactly like "the daemon denies us for no reason".
+pub const CLIENT_ID: &str = "st7735-160x80";
 
 /// Longest line the protocol may send: `max_json_bytes` + slack (SPEC 5.3).
 pub const LINE_CAP: usize = 1024 + 16;
@@ -102,7 +74,7 @@ pub const PONG: &str = "{\"t\":\"pong\"}";
 /// count) and is worth a diagnostics line the first few times it happens,
 /// because a daemon that renames a message should not look like a dead link.
 pub fn is_known_kind(kind: &[u8]) -> bool {
-    const KNOWN: [&[u8]; 13] = [
+    const KNOWN: [&[u8]; 14] = [
         b"hello",
         b"catalog",
         b"scenes",
@@ -115,6 +87,7 @@ pub fn is_known_kind(kind: &[u8]) -> bool {
         b"ping",
         b"pong",
         b"deny",
+        b"challenge",
         b"event",
     ];
     KNOWN.contains(&kind)
@@ -249,11 +222,15 @@ mod tests {
         // them (T5.1 finding, see the const's doc comment).
         assert_eq!(message_kind(HELLO.as_bytes()), Some(&b"hello"[..]));
         assert_eq!(uint_field(HELLO.as_bytes(), b"proto"), Some(1));
-        assert!(HELLO.contains("\"token\":"));
+        // v0.6: no key on the wire, ever. The daemon answers a hello that
+        // *advertises* the algorithm with a `challenge`.
+        assert!(!HELLO.contains("\"token\":"));
+        assert!(HELLO.contains("\"auth\":[\"hmac-sha256/128\"]"));
         assert!(HELLO.contains("\"accept\":[\"ui\",\"data\"]"));
         // And the two the daemon reads to decide what to send.
         assert!(HELLO.contains("\"role\":\"thin\""));
         assert!(HELLO.contains("\"client_id\":\"st7735-160x80\""));
+        assert!(HELLO.contains(CLIENT_ID), "CLIENT_ID drifted from HELLO");
     }
 
     #[test]
@@ -323,37 +300,7 @@ mod tests {
         assert!(HELLO.len() <= LINE_CAP, "hello is {} bytes", HELLO.len());
     }
 
-    #[test]
-    fn hello_into_with_no_token_is_the_pinned_hello() {
-        // This is the two-definitions guard: `HELLO` (a literal, for the tests
-        // that read it) and `HELLO_HEAD`/`HELLO_TAIL` (what the board actually
-        // sends) must produce the same bytes, or one of them has drifted.
-        let mut buf = [0u8; 512];
-        let n = hello_into("", &mut buf).expect("buffer big enough");
-        assert_eq!(&buf[..n], HELLO.as_bytes());
-    }
-
-    #[test]
-    fn hello_into_carries_the_token_verbatim() {
-        let token = "0123456789abcdef";
-        let mut buf = [0u8; 512];
-        let n = hello_into(token, &mut buf).expect("buffer big enough");
-        let line = core::str::from_utf8(&buf[..n]).unwrap();
-        assert!(line.contains("\"token\":\"0123456789abcdef\""));
-        // Everything except the token must be byte-identical to `HELLO`.
-        assert_eq!(line.len(), HELLO.len() + token.len());
-        assert!(line.starts_with(HELLO_HEAD));
-        assert!(line.ends_with(HELLO_TAIL));
-        assert!(n <= LINE_CAP, "hello with token is {} bytes", n);
-    }
-
-    #[test]
-    fn hello_into_refuses_a_buffer_that_is_too_small() {
-        let mut tiny = [0u8; 16];
-        assert!(hello_into("tok", &mut tiny).is_none());
-    }
-
-    #[test]
+        #[test]
     fn kind_is_read_wherever_the_field_sits() {
         assert_eq!(message_kind(br#"{"t":"catalog","ver":3}"#), Some(&b"catalog"[..]));
         assert_eq!(message_kind(br#"{"ver":3,"t":"data"}"#), Some(&b"data"[..]));

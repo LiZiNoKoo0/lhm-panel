@@ -501,3 +501,24 @@ fn watchdog_and_backoff_lines_pin_the_numbers() {
         );
     }
 }
+
+#[test]
+fn link_challenge_is_pinned() {
+    // One line, no fields: the nonce itself never reaches the log.
+    assert_eq!(text_of(|t| diag::link_challenge(t)), "LINK challenge\n");
+}
+
+#[test]
+fn link_auth_tx_is_pinned() {
+    assert_eq!(
+        text_of(|t| diag::link_auth_tx(t, 51)),
+        "LINK auth tx n=51\n"
+    );
+}
+
+#[test]
+fn link_srv_bad_is_pinned() {
+    // The impostor case. If this line ever changes, the runbook for "the board
+    // refuses to authenticate" stops matching the logs.
+    assert_eq!(text_of(|t| diag::link_srv_bad(t)), "LINK srv bad\n");
+}

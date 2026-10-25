@@ -177,7 +177,7 @@ class Link:
         sock = _connect((self.host, self.port))
         self._sock = sock
         hello = protocol.hello(self.client_id, "thick", self.w, self.h,
-                               token=self._current_token(), accept=["ui", "data"],
+                               auth=list(protocol.AUTH_ALGS), accept=["ui", "data"],
                                fw="webui-1")
         # Kept so the editor can gate its controls on what a *real* terminal
         # accepts. The dashboard's own hello is a thick one and says nothing
@@ -200,11 +200,45 @@ class Link:
 
     # -- inbound -------------------------------------------------------
 
+    def _answer_challenge(self, msg):
+        """Answer the daemon's nonce (s.2.1), after checking its own proof."""
+        nonce = msg.get("nonce")
+        key = self._current_token()
+        if not isinstance(nonce, str) or not nonce or not key:
+            self._fail_session("challenge without nonce or key")
+            return
+        srv = msg.get("srv")
+        if isinstance(srv, str) and not protocol.verify_srv(key, nonce, srv):
+            self._fail_session("daemon failed the srv check (impostor?)")
+            return
+        payload = protocol.encode(protocol.auth(
+            protocol.mac_for(key, nonce, self.client_id)))
+        try:
+            self._sock.sendall(payload)
+        except OSError as exc:
+            self._fail_session("auth send failed: %s" % exc)
+            return
+        with self._lock:
+            self.counts["auth_ok"] = self.counts.get("auth_ok", 0) + 1
+
+    def _fail_session(self, reason):
+        """Drop this connection; the reconnect loop will decide what to do next."""
+        with self._lock:
+            self._err = reason
+            self.counts["auth_failed"] = self.counts.get("auth_failed", 0) + 1
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
     def _adopt(self, line):
         msg = protocol.decode(line)
         if msg is None:
             with self._lock:
                 self.counts["bad_lines"] += 1
+            return
+        if msg.get("t") == "challenge":
+            self._answer_challenge(msg)
             return
         kind = protocol.kind(msg)
         now = time.time()

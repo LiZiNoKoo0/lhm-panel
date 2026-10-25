@@ -58,6 +58,7 @@ from pathlib import Path
 from pcmon import layouts
 from pcmon import lhm
 from pcmon import protocol
+from pcmon.devices import DeviceTable
 
 # ---------------------------------------------------------------------------
 # Constants -- every magic number lives here (TASKS.md coding rule 4)
@@ -96,6 +97,21 @@ EXAMPLE_CLIENT_ID = "sample-thin"
 SOURCE_FAKE = "fake"
 SOURCE_LHM = "lhm"
 SOURCES = (SOURCE_FAKE, SOURCE_LHM)
+
+#: Authentication (PROTOCOL.md s.2, v0.6).
+#:
+#: hmac   -- challenge-response only. What a release runs.
+#: static -- the v0.5 plain-token hello. Kept for boards that have not been
+#:           reflashed, and for the one command line in the docs that predates
+#:           the change.
+#: any    -- both, i.e. an upgrade window. Never a release default.
+AUTH_MODES = ("hmac", "static", "any")
+AUTH_MODE_DEFAULT = "hmac"
+HANDSHAKE_TIMEOUT_S = protocol.AUTH_TTL_MS / 1000.0   # 5 s to answer a challenge
+FAIL_WINDOW_S = 60.0        # a source failing this often...
+FAIL_LIMIT = 5              # ...this many times...
+LOCKOUT_S = 30.0            # ...is ignored for this long
+DEVICES_FILE = "devices.json"
 
 #: Where the LHM console bridge lives by default (see tools/lhm_bridge/).
 DEFAULT_BRIDGE_PATH = lhm.DEFAULT_BRIDGE_PATH
@@ -315,6 +331,12 @@ class Client:
         self.addr = addr
         self.client_id = None
         self.hello = None
+        #: v0.6 handshake. `authed` gates every frame that carries data; until
+        #: it is true the only thing this client receives is a challenge.
+        self.authed = False
+        self.nonce = None
+        self.challenged_at = 0.0
+        self.pending_hello = None
         self.role = None
         self.scene = DEFAULT_SCENE
         self.max_json = 0
@@ -555,11 +577,18 @@ class Daemon:
     def __init__(self, host=BIND_HOST, port=DEFAULT_PORT, token=None,
                  record_path=None, lenient=False, seed=None,
                  source=SOURCE_FAKE, bridge_path=DEFAULT_BRIDGE_PATH,
-                 layout_file=DEFAULT_LAYOUT_FILE):
+                 layout_file=DEFAULT_LAYOUT_FILE, auth_mode=AUTH_MODE_DEFAULT,
+                 devices_file=DEVICES_FILE):
         self.host = host
         self.port = port
         self.token = token or secrets.token_hex(TOKEN_BYTES)
         self.lenient = lenient
+        self.auth_mode = auth_mode if auth_mode in AUTH_MODES else AUTH_MODE_DEFAULT
+        #: s.2.4: one key per device, revocable without touching the others.
+        self.devices = DeviceTable(devices_file)
+        self._failures = {}      # source ip -> deque of monotonic failure times
+        self._lockouts = {}      # source ip -> monotonic deadline
+        self._pending = {}       # id(client) -> (client, deadline)
         self._record_path = record_path
         self._rec = None
         self._rec_lock = threading.Lock()
@@ -924,7 +953,7 @@ class Daemon:
         values = self._values()
         self.stats["data_frames"] += 1
         for client in self.snapshot():
-            if not client.accepts("data"):
+            if not client.authed or not client.accepts("data"):
                 continue
             msg = protocol.data(values)
             msg["ts"] = int(time.time())
@@ -955,6 +984,15 @@ class Daemon:
             return
         if kind == "hello":
             self.handle_hello(client, msg)
+        elif kind == "auth":
+            self.handle_auth(client, msg)
+        elif not client.authed:
+            # s.2.1 A-3: nothing else is accepted before the challenge is
+            # answered. Counting it separately makes a mis-ordered terminal
+            # visible in the stats instead of mysteriously silent.
+            self.stats["unauth_msgs"] += 1
+            self.log("%s: %r before auth, ignored" % (client.label(), kind))
+            return
         elif kind == "ping":
             client.push({"t": "pong"})
         elif kind == "event":
@@ -968,38 +1006,162 @@ class Daemon:
     def handle_hello(self, client, msg):
         reason = self._check_hello(msg)
         if reason is not None:
-            self.stats["denied"] += 1
-            self.log("%s: hello refused (%s)" % (client.label(), reason))
-            client.push({"t": "deny", "reason": reason})
-            client.request_close("hello refused: " + reason)
+            self._deny(client, reason)
             return
+
+        ip = client.addr[0] if client.addr else "?"
+        if self._locked_out(ip):
+            self._deny(client, "locked")
+            return
+
+        wants_hmac = _wants_hmac(msg)
+        has_token = isinstance(msg.get("token"), str) and msg.get("token") != ""
+
+        if self.auth_mode == "hmac" and not wants_hmac:
+            self._deny(client, "auth required")
+            return
+        if self.auth_mode == "static" and not has_token:
+            self._deny(client, "static token required")
+            return
+
+        if wants_hmac:
+            self._start_challenge(client, msg)
+            return
+
+        reason = self._check_static_token(msg)
+        if reason is not None:
+            self._note_failure(ip)
+            self._deny(client, reason)
+            return
+        self._accept(client, msg, how="static token")
+
+    # -- authentication (s.2.1) -------------------------------------------
+
+    def _key_for(self, client_id):
+        return self.devices.key_for(client_id)
+
+    def _start_challenge(self, client, msg):
+        client_id = msg.get("client_id")
+        key = self._key_for(client_id)
+        if key is None:
+            self.log("%s: no key for %r in %s -- pair it first: "
+                     "python -m pcmon.pair --new --client %s"
+                     % (client.label(), client_id, self.devices.path, client_id))
+            self._deny(client, "unknown client")
+            return
+        client.pending_hello = msg
+        client.nonce = protocol.new_nonce()
+        client.challenged_at = time.monotonic()
+        with self._lock:
+            self._pending[id(client)] = (client, client.challenged_at
+                                         + HANDSHAKE_TIMEOUT_S)
+        client.push(protocol.challenge(client.nonce, key=key))
+        self.stats["challenges"] += 1
+        self.log("%s: challenge sent (%s)" % (client.label(), protocol.AUTH_ALG))
+
+    def handle_auth(self, client, msg):
+        ip = client.addr[0] if client.addr else "?"
+        if not client.nonce or client.pending_hello is None:
+            self._deny(client, "unexpected auth")
+            return
+        if time.monotonic() - client.challenged_at > HANDSHAKE_TIMEOUT_S:
+            self._note_failure(ip)
+            self._deny(client, "auth timeout")
+            return
+
+        client_id = client.pending_hello.get("client_id")
+        key = self._key_for(client_id)
+        if key is None or not protocol.verify_mac(key, client.nonce, client_id,
+                                                  msg.get("mac")):
+            self.stats["auth_failed"] += 1
+            self._note_failure(ip)
+            self.log("%s: AUTH deny reason=bad mac" % client.label())
+            self._deny(client, "bad mac")
+            return
+
+        hello = client.pending_hello
+        client.pending_hello = None
+        self.stats["auth_ok"] += 1
+        self.log("%s: AUTH ok" % client.label())
+        self.devices.mark_seen(client_id)
+        self._accept(client, hello, how="challenge-response")
+
+    def _check_static_token(self, msg):
+        """v0.5 path: the token travelled in the clear. Only for --auth static/any."""
+        if self.lenient:
+            self.stats["lenient_tokens"] += 1
+            self.log("LENIENT mode: trusting any static token (development only)")
+            return None
+        if msg.get("token") != self.token:
+            return "bad token"
+        return None
+
+    def _accept(self, client, msg, how):
+        """Handshake done: adopt the hello and (s.16 red line 4) resend everything."""
         hello_msg = self._normalize_hello(msg)
         client.adopt_hello(hello_msg)
+        client.authed = True
+        client.nonce = None
+        with self._lock:
+            self._pending.pop(id(client), None)
         self.register(client)
         self.stats["hellos"] += 1
         display = hello_msg.get("display") or {}
-        self.log("hello from %s role=%s %sx%s charset=%s prims=%s fonts=%s"
+        self.log("hello from %s role=%s %sx%s charset=%s prims=%s fonts=%s auth=%s"
                  % (client.client_id, hello_msg.get("role"),
                     display.get("w"), display.get("h"),
                     hello_msg.get("charset"),
                     ",".join(str(p) for p in hello_msg.get("primitives") or []),
-                    ",".join(str(f) for f in hello_msg.get("fonts") or [])))
-        # s.16 red line 4: resend everything, assume no cache is valid.
+                    ",".join(str(f) for f in hello_msg.get("fonts") or []),
+                    how))
         client.scene = DEFAULT_SCENE
         self.send_catalog(client)
         self.send_scenes(client)
         self.send_scene(client, client.scene)
         self.send_data(client)
 
+    def _deny(self, client, reason):
+        self.stats["denied"] += 1
+        self.log("%s: deny reason=%s" % (client.label(), reason))
+        client.push({"t": "deny", "reason": reason})
+        client.request_close("denied: " + reason)
+
+    def _note_failure(self, ip):
+        now = time.monotonic()
+        queue = self._failures.setdefault(ip, collections.deque())
+        queue.append(now)
+        while queue and now - queue[0] > FAIL_WINDOW_S:
+            queue.popleft()
+        if len(queue) >= FAIL_LIMIT:
+            self._lockouts[ip] = now + LOCKOUT_S
+            self.log("source %s locked for %gs after %d failures"
+                     % (ip, LOCKOUT_S, len(queue)))
+
+    def _locked_out(self, ip):
+        deadline = self._lockouts.get(ip)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            del self._lockouts[ip]
+            return False
+        return True
+
+    def _sweep_handshakes(self, now):
+        """Close connections that never answered their challenge (A-2)."""
+        expired = []
+        with self._lock:
+            for ident, (client, deadline) in list(self._pending.items()):
+                if now >= deadline:
+                    expired.append(client)
+                    del self._pending[ident]
+        for client in expired:
+            self.stats["auth_timeouts"] += 1
+            self.log("%s: AUTH timeout (no answer in %gs)"
+                     % (client.label(), HANDSHAKE_TIMEOUT_S))
+            self._deny(client, "auth timeout")
+
     def _check_hello(self, msg):
-        """Return None when acceptable, else a deny reason string."""
-        token = msg.get("token")
-        if not self.lenient:
-            if not isinstance(token, str) or token != self.token:
-                return "bad token"
-        elif isinstance(token, str) and token != self.token:
-            self.stats["lenient_tokens"] += 1
-            self.log("LENIENT mode: trusting unknown token (development only)")
+        """Structural checks only (s.5). Authentication is a separate step."""
         client_id = msg.get("client_id")
         if not isinstance(client_id, str) or not client_id:
             return "bad client_id"
@@ -1048,7 +1210,7 @@ class Daemon:
             width,
             height,
             proto=protocol.PROTO_VERSION,
-            token=msg.get("token") or "",
+            token=msg.get("token") or None,
             depth=depth,
             charset=msg.get("charset") if isinstance(msg.get("charset"), str) else "ascii",
             accept=accept if isinstance(msg.get("accept"), list) else None,
@@ -1169,6 +1331,7 @@ class Daemon:
             while not self._stop.is_set():
                 now = time.monotonic()
                 self._source.tick(now)
+                self._sweep_handshakes(now)
                 if now >= next_data:
                     next_data = now + DATA_INTERVAL_S
                     try:
@@ -1367,7 +1530,10 @@ class Daemon:
              if live else
              "PC-Monitor fake daemon (PROTOCOL.md v0.4, fake data only)"),
             "  listen   : %s:%d (TCP, NDJSON)" % (self.host, self.port),
-            "  token    : " + self.token,
+            "  auth     : " + (self.auth_mode
+                                + (" (devices: %s)" % self.devices.path
+                                   if self.auth_mode != "static" else "")),
+            "  token    : " + (self.token if self.auth_mode != "hmac" else "(not used)"),
         ]
         if live:
             bridge = getattr(self._source, "bridge_path", "")
@@ -1383,6 +1549,7 @@ class Daemon:
             % (1.0 / DATA_INTERVAL_S, 1.0 / TICK_INTERVAL_S, int(SEND_TIMEOUT_S * 1000)),
             "  record   : " + (str(self._record_path) if self._record_path else "(disabled)"),
             "  token check: " + ("LENIENT (dev only)" if self.lenient else "strict"),
+            "  paired   : " + (", ".join(sorted(self.devices.entries())) or "(none)"),
             "  hello    : " + example_hello(self.token),
         ])
         for line in lines:
@@ -1392,6 +1559,12 @@ class Daemon:
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+
+def _wants_hmac(msg):
+    """True when a hello offers the v0.6 challenge-response algorithm."""
+    offered = msg.get("auth")
+    return isinstance(offered, list) and protocol.AUTH_ALG in offered
 
 
 def _is_number(value):
@@ -1433,6 +1606,12 @@ def parse_args(argv=None):
     parser.add_argument("--bridge", metavar="PATH", default=DEFAULT_BRIDGE_PATH,
                        help="lhm bridge executable (default %s); ignored by --source fake"
                             % DEFAULT_BRIDGE_PATH)
+    parser.add_argument("--auth", choices=AUTH_MODES, default=AUTH_MODE_DEFAULT,
+                       help="authentication: hmac (challenge-response, default), "
+                            "static (v0.5 plain token) or any (both, upgrade window)")
+    parser.add_argument("--devices", metavar="FILE", default=DEVICES_FILE,
+                       help="device table client_id -> key (default %s); only used "
+                            "by --auth hmac/any" % DEVICES_FILE)
     parser.add_argument("--layouts", metavar="FILE", default=DEFAULT_LAYOUT_FILE,
                        help="applied layout file (default %s); the daemon resends "
                             "exactly this after a restart, never an editor draft "
@@ -1460,7 +1639,8 @@ def main(argv=None):
     daemon = Daemon(host=args.host, port=args.port, token=args.token,
                     record_path=args.record, lenient=args.lenient, seed=args.seed,
                     source=args.source, bridge_path=args.bridge,
-                    layout_file=args.layouts)
+                    layout_file=args.layouts, auth_mode=args.auth,
+                    devices_file=args.devices)
     daemon.banner()
     written = write_token_file(daemon.token)
     if written is not None:

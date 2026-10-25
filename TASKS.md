@@ -19,6 +19,57 @@
 | P2 | `pcmon/webui.py` + `webstatic/` | ✅ 完成（含新增编辑器） | 布局编辑器端到端上板验证（2026-10-25） |
 | — | `pcmon/layouts.py`（新增） | ✅ 完成 | 已应用布局持久化；`ver` 只在 apply 时 +1 |
 
+### C 系列（v0.6 认证 / 配对）
+
+| 卡 | 交付物 | 状态 | 证据 |
+|---|---|---|---|
+| C1 | `PROTOCOL.md` v0.6：§2 重写（三帧挑战应答）、§2.1 握手、§2.2 配对、§2.3 串口配对、§2.4 密钥生命周期、§2.5 威胁模型、§2.6 服务模式；§4 消息总表、§5 hello、§18/§19 样例、§20 兼容表同步 | ✅ 完成（2026-10-25） | 文档已落盘；`hello` 不再带 `token`，残留提及只剩变更摘要与兼容表 |
+| C2 | PC 侧实现：`pcmon/protocol.py` 的 mac/srv/challenge/auth、`fake_daemon.py` 握手门 + `--auth hmac\|static\|any` + 失败锁定、`term_tk`/`webui`/`launcher` 应答挑战、`pcmon/devices.py` 设备表 + `pcmon/pair.py`、`tools/check_auth.py` | ✅ 完成（2026-10-25） | `tools/check_auth.py` → **AUTH OK (12 checks)**（含重放拒绝、错 mac、跨 client_id 不通用、认证前零泄漏、5 s 超时、第 6 次 locked、static 模式两态）；`python -m pcmon.protocol` → **ALL OK 12/12**（含两条钉死的 mac/srv 向量）；`term_tk.py --selftest` → **22/22 PASS**（现在走的是真握手，不再是 --lenient 旁路） |
+| C3 | 固件：`sha256.rs` + `auth.rs`（no_std、NIST/RFC 向量）、`wire` hello 去 token、`session` 的 `Challenged` 态、`net_link` 验 srv + 回 mac、三条串口行；串口 `KW` 配对**未做** | 🟡 1–3 上板验过 / 4 未开工（2026-10-26 01:20） | `cargo test` 203 绿（含 `auth::mac_matches_the_python_side`）；固件零 warning；板上两次 `AUTH ok`：`[01:14:20]` 首次、`[01:14:41]` 复位后自动重连 |
+| C5 | 手机：webui 放开 + HTTPS 自签 + 6 位配对码 + cookie 会话 | ⬜ 未开工 | |
+| C6 | 指标源可插拔（服务器 / Linux 没有 LHM） | ⬜ 未开工 | |
+
+
+#### C3 现场状态（2026-10-26 01:20，睡觉前留档）
+
+**已经成立的**（不是推断，是 daemon 日志原文）：
+
+```
+[01:14:20] discover from 192.168.1.53 -> here
+[01:14:20] connection from 192.168.1.53:51190
+[01:14:20] 192.168.1.53:51190: challenge sent (hmac-sha256/128)
+[01:14:20] 192.168.1.53:51190: AUTH ok
+[01:14:20] hello from st7735-160x80 role=thin 160x80 charset=ascii prims=rect,text,num fonts=16,32,48 auth=challenge-response
+[01:14:40] closed st7735-160x80 (done) sent=15
+[01:14:41] connection from 192.168.1.53:51190     <- 复位后自己重连
+[01:14:41] challenge sent (hmac-sha256/128)
+[01:14:41] AUTH ok
+```
+
+- 新固件已烧进 **A 板**（MAC `b0:3f:d3:42:c7:58`，COM10），烧写时间 01:11，App 717,376 B
+- hello 里**没有 token**（`prims=rect,text,num`、`auth=challenge-response` 是新固件的签名）
+- daemon 用严格 `--auth hmac` 跑的，不是 `any`
+
+**现在的弱点，必须在 C3 第 4 步收掉**：
+
+- 板子 flash 里的 key 仍是 v0.5 继承下来的 **`0123456789abcdef`**（16 字符 / 64 位，而且是仓库公开值）
+- `devices.json` 里 `st7735-160x80` 就是这条；`webui` 那条是仪表盘自动配的（128 位随机）
+- `launcher.py` 仍默认 `--auth any`（给旧固件留窗口），板子换成随机 key 之后应改成 `hmac`
+
+**一个会误导人的现象**（已确认，不是 bug）：
+
+复位后串口在 `STORE ok creds=yes slot=B seq=5` 之后就断，`WIFI init` 都不出现——
+是 **WiFi 射频上电瞬间 CH343 整块掉出设备树**（HANDOVER §7.1 / §11）。
+所以 `LINK challenge` / `LINK auth tx n=` 这两行抓不到；它们确实执行了，
+证据是 daemon 回了 `AUTH ok`（mac 不对不可能通过）。
+
+**下一步（按顺序）**：
+
+1. `creds`/`store` 写路径接一条 `KW <32hex>`：写 A/B、读回校验、回 `KOK slot=… seq=… crc=…`
+2. `pair --serial COM10 --client st7735-160x80` 生成 128 位随机 key 写进板子，同时更新 `devices.json`
+3. 换掉 `daemon.token` 里的公开值，`launcher.py` 默认改 `--auth hmac`
+4. `check_auth.py` 里加一条「板子同款 hello」的回归（现在它测的是 PC 侧客户端）
+
 **验收状态必须如实区分**：「✅ 完成」= 本次会话跑过并能复现；「⚠️ 完成未验」= 代码在，但验收项没跑。
 不要把「文件存在」当成「验收通过」——上一版 `HANDOVER` 就因此写着 T6a 未接线。
 

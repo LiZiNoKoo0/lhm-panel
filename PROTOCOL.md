@@ -1,4 +1,4 @@
-# PC-Monitor 显示协议 v0.5
+# PC-Monitor 显示协议 v0.6
 
 > 上位机（PC daemon）与显示终端之间的线协议。
 >
@@ -6,6 +6,23 @@
 > 桌面窗口、甚至命令行里的 ASCII 画屏 —— 只要它遵守本协议，就能当显示器。
 >
 > 固件/客户端可以随便写，PC 端不需要知道屏幕是什么。
+
+---
+
+## 变更摘要（v0.5 → v0.6）
+
+**v0.6 只做一件事：把「一个明文 token」换成「挑战应答 + 每设备一份密钥」。**
+
+| 章节 | 变更 | 兼容性 |
+|---|---|---|
+| §2 | **重写**：三帧挑战应答（`hello` / `challenge` / `auth`），新增 §2.1–§2.6（配对、密钥生命周期、威胁模型、服务模式） | **破坏性**：见下 |
+| §4 | 消息总表新增 `challenge`、`auth` | 新增类型，老终端忽略未知 `t` |
+| §5 | `hello` **去掉 `token`**，新增 `auth`（支持的算法列表） | **破坏性** |
+| §18/§19 | 会话样例补上握手三帧 | 文档 |
+
+**唯一的破坏性变更**：v0.5 终端把 token 明文放在 `hello` 里；v0.6 要求先 `challenge` 再 `auth`。
+过渡做法：daemon 的 `--auth` 有三个值 —— `hmac`（默认，v0.6）、`static`（只认老 hello）、
+`any`（两者都收，**只用于给老固件留升级窗口**）。发布默认必须是 `hmac`。
 
 ---
 
@@ -100,20 +117,134 @@
 
 ## 2. 认证
 
-**基于 token，不基于设备 ID**（`client_id` 是终端自报的，可以伪造）。
+**v0.6 起：挑战应答。终端不再发送任何形式的密钥，只发送一个由密钥算出的 mac。**
 
-```json
-{"t":"hello","token":"a3f9c2...","client_id":"esp32-a", ...}
+密钥（下称 `K`）是**每设备一份的 128 位随机值**，以 32 个 hex 字符的形式存在双方：
+终端存在自己的 flash / 浏览器存储里，daemon 存在设备表里。`K` **从不在网络上传输**——
+它只在**配对**那一次（§2.2）经带外通道落地。
+
+### 2.1 握手（三帧）
+
+```
+H→P  {"t":"hello","proto":1,"client_id":"esp32-a","auth":["hmac-sha256/128"], ...}
+P→H  {"t":"challenge","nonce":"9f3c...（32 hex）","alg":"hmac-sha256/128","ttl_ms":5000,
+      "srv":"1a2b...（16 hex，可选）"}
+H→P  {"t":"auth","mac":"4a1b...（32 hex）"}
+P→H  {"t":"catalog", ...}                ← 通过；此后才允许 ui/data/scenes/cmd
+P→H  {"t":"deny","reason":"bad mac"}     ← 不通过；随后立刻断开
 ```
 
-- daemon 首次启动生成一个随机 token，存在配置里
-- 终端在第一帧 hello 里带上
-- token 不匹配 → daemon 回 `{"t":"deny","reason":"bad token"}` 并**立刻断开**
+mac 的唯一定义（实现不得自创变体）：
 
-宽松模式（开发期可开）：daemon 收到未知 token 时，在管理界面弹出"是否信任此设备"，
-批准后把 token 加入白名单。行为类似蓝牙配对。
+```
+mac = HMAC-SHA256(key = K, msg = nonce_ascii || client_id)[0:16]     -> 32 个 hex 字符
+```
 
-⚠️ **daemon 只监听局域网地址**，不要绑 `0.0.0.0` 暴露到公网。
+- `K` 是 **32 个 ASCII 字符**（16 字节随机值的 hex 表示），直接当 HMAC key 用，**不做二次派生**
+- `nonce` 按 **ASCII 字节**拼接（32 个字符），不是 hex 解码后的 16 字节
+- `client_id` 一并进 MAC 输入：**一帧 mac 挪到别的设备名下一律无效**
+- 截断到 128 位：与密钥等长，猜不出来，且板上格式化更省 RAM
+
+| # | 规则 | 理由 |
+|---|---|---|
+| A-1 | `nonce` 每连接生成一次，16 字节随机，**单次使用** | 录下来的 mac 换个连接即废 |
+| A-2 | `challenge` 发出后 **5 秒**内必须收到 `auth`，过期即 `deny reason="auth timeout"` | 限制重放窗口 |
+| A-3 | **握手期间 daemon 只允许发 `challenge`**。`catalog`/`scenes`/`ui`/`data`/`cmd`/`time`/`debug` 一律等认证通过 | 未认证的连接不该看到任何数据 |
+| A-4 | mac 不匹配 → `deny reason="bad mac"` + 立刻断开 + 计数 | |
+| A-5 | 同一来源 60 秒内 5 次失败 → 锁 30 秒，回 `deny reason="locked"` | 挡脚本试错 |
+| A-6 | 认证通过后，该连接上的后续消息一律视为已授权，**不做逐条签名** | 会话级信任，省电省流量 |
+| A-7 | 终端**必须**校验 daemon：`challenge.srv = HMAC-SHA256(K, "srv" || nonce)[0:8]`（16 hex） | 能挡住冒充的 daemon；固件不验就是漏洞，不是选项 |
+
+### 2.2 配对：`K` 怎么来、谁告诉谁
+
+**`K` 不通过网络告诉对方。** 它只在一个「人把眼睛或手放在正确位置」的动作里产生并落地。
+
+抽象成一个概念：**pairing channel = 一个只有本机可信用户才能读到的输出**。
+同一个配对请求，三种渲染器，同一套 API：
+
+| 渲染器 | 用在 | 形态 |
+|---|---|---|
+| CLI stdout | 服务器 / SSH / 容器 | `pcmon pair --new --client phone` → `CODE 482913 expires 60s` |
+| GUI 面板 | 桌面 | webui 里的配对卡片（在**操作者的**屏幕上，不在被配对的设备上） |
+| 审计日志 | 无人值守 | `PAIR pending client=phone from=192.168.1.7 code_hash=...` |
+
+流程（以手机为例）：
+
+```
+1. 手机打开 daemon 页面 → 页面只显示「配对中：请向 PC 索取 6 位码」
+2. 用户在 PC / SSH 上执行 pcmon pair --new --client phone → 读到 6 位码
+3. 用户在手机上输入这 6 位码
+4. 双方各自派生同一把密钥：
+     K = hex( HKDF-SHA256(secret = code,
+                          salt   = client_id || client_nonce || daemon_nonce,
+                          info   = "pcmon-pair-v1", len = 16) )
+5. daemon 把 (client_id -> K) 写进设备表；手机把 K 存进 localStorage
+6. 双方立刻做一次完整的挑战应答自检，通过才算配对完成
+```
+
+| # | 规则 | 理由 |
+|---|---|---|
+| P-1 | 码是 **6 位数字**、**60 秒过期**、**一次性** | 20 bit 的秘密全靠这三条守住 |
+| P-2 | **落盘的只有 `sha256(code)`**，不落明文码 | 磁盘被别人看了也配不上 |
+| P-3 | 同一来源 10 分钟内 3 次错码 → 该来源锁 10 分钟 | 100 万种猜法也试不完 |
+| P-4 | 同一时刻**最多一个**待配对请求；新请求顶掉旧的，并留审计行 | 免得"哪个码是哪个" |
+| P-5 | 配对成功**立刻**跑一次挑战应答自检；失败即视为配对失败并回滚设备表 | 别留下"看着成功其实连不上"的状态 |
+| P-6 | **码绝不出现在被配对设备请求的那个页面上** | 否则等于把码广播给整个网段 |
+| P-7 | 有物理通道的终端（板子）优先走串口配对（§2.3），不走 6 位码 | 插线的在场证明比 6 位码强得多 |
+
+### 2.3 串口配对（有 flash + 串口的终端，例如这块 ESP32）
+
+```
+python tools/pair.py --port COM10 --client-id esp32-a
+  -> K = secrets.token_bytes(16)                 # 32 个 hex 字符
+  -> 串口一行:  KW <32 hex>
+  -> 固件写 A/B 记录、读回校验
+  -> 串口回:    KOK slot=B seq=5 crc=0x...
+  -> 工具把 K 写进 daemon 设备表
+```
+
+**不升存储格式**：`creds` 记录 `ver=2` 的那个 32 字节字段本来就是给 token 用的，
+32 个 hex 字符恰好塞满。在场证明来自「这根线是你插的」——这是本项目里最强的一条路。
+
+### 2.4 密钥生命周期
+
+| 事 | 怎么做 |
+|---|---|
+| 生成 | **只在配对时生成**。源码里不允许存在任何"能连上的默认值"；bench 用的常量必须锁在 feature 里，发布构建里连符号都没有 |
+| 存储（终端） | 板子：flash 的 `creds` 记录（A/B 双份）；浏览器：`localStorage` |
+| 存储（daemon） | 设备表 `devices.json`，**权限 600**；容器里从挂载卷或 secret 注入 |
+| 撤销 | `pcmon pair --revoke esp32-a`：删记录、立刻生效（下一次挑战应答就失败）。**只影响这一台** |
+| 轮转 | 重新配对覆盖即可，旧值随即失效 |
+| 空闲过期 | `last_seen` 超 30 天的设备标记 stale，`--prune` 手动清（**不自动删**，免得误杀长期离线的板子） |
+| 审计 | `PAIR` / `REVOKE` / `AUTH ok|deny` 每次一行，落盘，带时间、来源 IP、client_id |
+
+### 2.5 威胁模型（写清楚能挡什么、挡不住什么）
+
+| 攻击 | 挡不挡 | 靠什么 |
+|---|---|---|
+| 抓包重放（录一帧 hello 冒充终端） | 挡住 | 挑战应答：nonce 每连接不同 |
+| 同网段暴力试密钥 | 挡住 | 128 位密钥 + 失败锁定 |
+| 猜 6 位配对码 | 基本挡住 | 60 秒 + 一次性 + 错 3 次锁 10 分钟 |
+| 冒充 daemon 骗终端（钓鱼 AP） | 挡住 | 终端**必须**验 `challenge.srv`（A-7） |
+| **明文 HTTP 上嗅探手机会话** | **挡不住** | 抓到的 mac 在同一 nonce 窗口内可当场重放。手机要真安全必须 HTTPS + WebCrypto（另开卡） |
+| **物理接触设备（拆板子读 flash）** | **挡不住** | flash 里是明文密钥（`SPEC §6` 已承认）。要挡得上 flash 加密 + secure boot |
+| **拿到 PC 的人**（读 `devices.json`） | **挡不住** | 那时 PC 已失守，任何密钥分发方案都救不了 |
+
+一句话：**这套东西守的是「网络上的人」，不是「拿着设备的人」。**
+
+### 2.6 服务模式（daemon 跑在服务器上）
+
+| 项 | 要求 |
+|---|---|
+| 绑定 | **默认只绑内网地址或回环**，不要默认 `0.0.0.0`；要对外就走反代暴露 TLS，不直接暴露 7802 |
+| 真实 IP | 反代后按 `X-Forwarded-For` 取来源，**且只信白名单里的代理**；否则失败锁定可被伪造 IP 绕过 |
+| 时钟 | nonce 有效期用**单调时钟**，不用墙钟（NTP 跳变会让"过期"失效） |
+| 无 GUI | 配对必须能全靠 CLI 完成（`pair --new / --list / --approve / --revoke`），不依赖窗口 |
+| 无人值守 | 待配对请求落盘（`pending.json`），进程重启后在有效期内仍可批准 |
+| 审计 | `PAIR` / `AUTH` / `REVOKE` 三行都能 grep |
+| 数据源 | 服务器上通常没有 LHM：**指标源要可插拔**（另开卡；本协议只规定 `catalog.source` 语义） |
+
+⚠ **原 v0.5 那句话仍然有效，而且更重要**：daemon 不要裸绑 `0.0.0.0` 暴露到公网。
 
 ---
 
@@ -135,7 +266,9 @@ thick 终端也可以在 `accept` 里带上 `"ui"`，表示"我也想看看你�
 |---|---|---|
 | H→P | `discover` | （UDP 广播）请求地址 |
 | P→H | `here` | （UDP）回应地址 |
-| H→P | `hello` | 上线，**声明能力 + 认证** |
+| H→P | `hello` | 上线，**声明能力**（v0.6 起不带密钥） |
+| P→H | `challenge` | 挑战：提交 nonce，要求终端证明持有密钥 |
+| H→P | `auth` | 应答：`mac`（HMAC 截断值） |
 | P→H | `deny` | 认证失败，随后断开 |
 | P→H | `catalog` | 指标目录 |
 | P→H | `scenes` | 页面列表 |
@@ -158,7 +291,7 @@ PC→H 消息带 `"s":<seq>` 递增序号。
 {
   "t": "hello",
   "proto": 1,
-  "token": "a3f9c2...",
+  "auth": ["hmac-sha256/128"],
   "client_id": "esp32-a",
   "fw": "1.0.0",
   "role": "thin",
@@ -210,7 +343,7 @@ PC→H 消息带 `"s":<seq>` 递增序号。
 | 字段 | 必填 | 含义 |
 |---|---|---|
 | `proto` | ✅ | 协议主版本 |
-| `token` | ✅ | 认证令牌 |
+| `auth` | 建议 | 终端支持的认证算法，例如 `["hmac-sha256/128"]`。缺省 = 只会 v0.5 静态 token，需要 daemon 开 `--auth static` |
 | `client_id` | ✅ | 终端自称的名字（日志/多终端区分，**不可作为身份凭证**） |
 | `fw` | 建议 | 固件版本，排障用（daemon 日志能看出板子跑的是哪一版） |
 | `role` | ✅ | `thin` ｜ `thick` |
@@ -735,10 +868,13 @@ H→P  {"t":"stat","rssi":-52,"rx":1234,"drop":0,"heap":88000,"uptime":3600}
 H→P  {"t":"discover"}                                ← UDP 广播
 P→H  {"t":"here","ip":"192.168.1.100","port":7802}
 
-H→P  {"t":"hello","proto":1,"token":"a3f9...","client_id":"esp32-a","role":"thin",
+H→P  {"t":"hello","proto":1,"client_id":"esp32-a","auth":["hmac-sha256/128"],"role":"thin",
       "accept":["ui","data"],"display":{"w":240,"h":320,"depth":16},"charset":"ascii",
       "limits":{"max_nodes":32,"max_json_bytes":4096},
       "primitives":["rect","path","text","num"],"fonts":[12,16],"input":["key"]}
+
+P→H  {"t":"challenge","nonce":"9f3c...（32 hex）","alg":"hmac-sha256/128","ttl_ms":5000}
+H→P  {"t":"auth","mac":"4a1b...（32 hex）"}
 
 P→H  {"t":"catalog","s":1,"ver":1,"metrics":[{"id":"cpu.total","label":"CPU",...}]}
 P→H  {"t":"scenes","s":2,"list":[{"i":0,"title":"CPU"}]}
@@ -755,9 +891,12 @@ P→H  {"t":"cmd","s":6,"target":"esp32-a","action":"show","scene":1}
 ## 19. 完整会话（thick 终端）
 
 ```
-H→P  {"t":"hello","proto":1,"token":"...","client_id":"phone","role":"thick",
+H→P  {"t":"hello","proto":1,"client_id":"phone","auth":["hmac-sha256/128"],"role":"thick",
       "accept":["data"],"display":{"w":1080,"h":2400,"depth":32},"charset":"utf8",
       "limits":{"max_json_bytes":65536},"primitives":[],"fonts":[12,16,24,32],"input":["touch"]}
+
+P→H  {"t":"challenge","nonce":"9f3c...（32 hex）","alg":"hmac-sha256/128","ttl_ms":5000}
+H→P  {"t":"auth","mac":"4a1b...（32 hex）"}
 
 P→H  {"t":"catalog","s":1,"ver":1,"metrics":[...]}   ← 告诉它有什么可画
 P→H  {"t":"data","s":2,"v":{"cpu.total":23.4}}
@@ -774,6 +913,8 @@ P→H  {"t":"data","s":2,"v":{"cpu.total":23.4}}
 | 新增原语/控件类型 | 忽略未知 `type`（`primitives` 声明也能提前避开） |
 | 新增消息类型 | 忽略未知 `t` |
 | 新增字段 | 忽略未知字段 |
+| v0.5 终端（`hello` 带 `token`、无 `auth`） | v0.6 daemon 默认拒；`--auth static` 或 `any` 才放行。老固件应尽快升级 |
+| v0.6 终端连 v0.5 daemon | daemon 不认 `challenge` → 终端按退避重连，屏上停自检页 |
 | `proto` 主版本不同 | 屏上显示 `PROTO MISMATCH`，daemon 日志报错 |
 
 ---

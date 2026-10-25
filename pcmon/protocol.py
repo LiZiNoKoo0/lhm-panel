@@ -26,8 +26,11 @@ This source file is intentionally pure ASCII (TASKS.md coding rules: PowerShell
 """
 
 import copy
+import hashlib
+import hmac as _hmac
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -50,9 +53,10 @@ RECONNECT_BACKOFF_S = (1, 2, 4, 8, 10)
 STALE_FACTOR = 3.0
 
 #: Every message type of the protocol, keyed by direction.
-KINDS_TERM_TO_PC = ("discover", "hello", "event", "stat", "ping")
+KINDS_TERM_TO_PC = ("discover", "hello", "auth", "event", "stat", "ping")
 KINDS_PC_TO_TERM = (
     "here",
+    "challenge",
     "deny",
     "catalog",
     "scenes",
@@ -89,6 +93,20 @@ ROLES = ("thin", "thick")
 
 #: Character sets a terminal can declare in hello.
 CHARSETS = ("ascii", "utf8")
+
+#: Authentication (PROTOCOL.md s.2, v0.6).
+#:
+#: The key never goes on the wire: the terminal proves it holds K by answering a
+#: nonce, and the daemon proves it holds K too (`srv`), so an impostor cannot
+#: harvest a valid answer. One definition of the answer, used by both sides --
+#: mac_for() below. Do not re-implement it anywhere else.
+AUTH_ALG = "hmac-sha256/128"
+AUTH_ALGS = (AUTH_ALG,)
+NONCE_BYTES = 16        # -> 32 hex chars on the wire
+MAC_BYTES = 16          # 128-bit truncated HMAC -> 32 hex chars
+SRV_BYTES = 8           # 64-bit truncated HMAC -> 16 hex chars
+AUTH_TTL_MS = 5000      # the answer must arrive within this
+SRV_LABEL = b"srv"
 
 # ---------------------------------------------------------------------------
 # Small internal helpers
@@ -325,7 +343,11 @@ def hello(client_id, role, w, h, **kw):
     name (e.g. fw="1.0.0") which is copied to the top level.
     """
     proto = kw.pop("proto", PROTO_VERSION)
-    token = kw.pop("token", "")
+    # v0.6 puts no key in hello. `token` is still accepted so a terminal can
+    # speak v0.5 static-token mode to a daemon started with --auth static; when
+    # it is absent we advertise the algorithms we can do instead.
+    token = kw.pop("token", None)
+    algos = kw.pop("auth", None)
     accept = kw.pop("accept", None)
     charset = kw.pop("charset", "ascii")
     depth = kw.pop("depth", 16)
@@ -355,7 +377,8 @@ def hello(client_id, role, w, h, **kw):
     msg = {
         "t": "hello",
         "proto": proto,
-        "token": token,
+        **({"token": token} if token else
+           {"auth": _as_list(algos if algos is not None else [AUTH_ALG])}),
         "client_id": client_id,
         "role": role,
         "accept": _as_list(accept),
@@ -418,6 +441,89 @@ def cmd(action, target="*", **kw):
     for key, value in kw.items():
         msg[key] = value
     return msg
+
+
+# ---------------------------------------------------------------------------
+# Authentication (PROTOCOL.md s.2). Pure computation: no I/O, no clock.
+# ---------------------------------------------------------------------------
+
+
+def mac_for(key, nonce, client_id):
+    """The one and only definition of the answer to a challenge.
+
+        mac = HMAC-SHA256(K, nonce_ascii || client_id)[0:16]   -> 32 hex chars
+
+    `nonce` is the ASCII of the hex string as it appears on the wire, not the
+    decoded bytes, so a firmware and a Python client cannot disagree about what
+    was signed. `client_id` is inside the MAC, so an observed answer cannot be
+    replayed under another device's name.
+    """
+    if not isinstance(key, str) or not key:
+        raise ValueError("mac_for: empty key")
+    if not isinstance(nonce, str) or not nonce:
+        raise ValueError("mac_for: empty nonce")
+    if not isinstance(client_id, str) or not client_id:
+        raise ValueError("mac_for: empty client_id")
+    message = (nonce + client_id).encode("ascii")
+    digest = _hmac.new(key.encode("ascii"), message, hashlib.sha256).digest()
+    return digest[:MAC_BYTES].hex()
+
+
+def srv_for(key, nonce):
+    """The daemon's half of the proof: HMAC-SHA256(K, "srv" || nonce)[0:8].
+
+    A terminal that checks this cannot be tricked into answering a challenge
+    minted by somebody who does not hold K.
+    """
+    if not isinstance(key, str) or not key:
+        raise ValueError("srv_for: empty key")
+    message = SRV_LABEL + nonce.encode("ascii")
+    digest = _hmac.new(key.encode("ascii"), message, hashlib.sha256).digest()
+    return digest[:SRV_BYTES].hex()
+
+
+def verify_mac(key, nonce, client_id, mac):
+    """Constant-time check of a terminal's answer."""
+    if not isinstance(mac, str):
+        return False
+    try:
+        expected = mac_for(key, nonce, client_id)
+    except (ValueError, UnicodeError):
+        return False
+    return _hmac.compare_digest(expected, mac.strip().lower())
+
+
+def verify_srv(key, nonce, srv):
+    """Constant-time check of the daemon's half (used by terminals)."""
+    if not isinstance(srv, str):
+        return False
+    try:
+        expected = srv_for(key, nonce)
+    except (ValueError, UnicodeError):
+        return False
+    return _hmac.compare_digest(expected, srv.strip().lower())
+
+
+def new_nonce():
+    """16 random bytes as 32 hex chars: one per connection, single use."""
+    return secrets.token_bytes(NONCE_BYTES).hex()
+
+
+def challenge(nonce, key=None, alg=AUTH_ALG, ttl_ms=AUTH_TTL_MS):
+    """Build the challenge the daemon sends right after hello.
+
+    Pass `key` to include the `srv` proof. Without it the message is still
+    valid; the terminal just cannot tell a real daemon from an impostor.
+    """
+    msg = {"t": "challenge", "nonce": nonce, "alg": alg, "ttl_ms": int(ttl_ms)}
+    if key:
+        msg["srv"] = srv_for(key, nonce)
+    return msg
+
+
+def auth(mac):
+    """Build the terminal's answer to a challenge."""
+    return {"t": "auth", "mac": mac}
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +845,62 @@ def _selftest_builders():
     _check(cmd("show", scene=1)["action"] == "show", "cmd kwargs")
 
 
+def _selftest_auth():
+    """The answer to a challenge, and the daemon's half of it.
+
+    The two pinned vectors are the whole point of this case: if anyone changes
+    what is signed (decoding the nonce, adding a separator, signing only the
+    nonce) the numbers below stop matching and the build fails, instead of a
+    firmware and a daemon quietly disagreeing at runtime.
+    """
+    key = "0123456789abcdef"
+    nonce = "ab" * 16
+
+    mac = mac_for(key, nonce, "esp32-a")
+    _check(mac == "a45fdad8c13e4ab02e140693b88e4005",
+           "pinned mac vector changed: %r" % mac)
+    _check(len(mac) == 32, "mac must be 32 hex chars")
+    _check(verify_mac(key, nonce, "esp32-a", mac), "a correct mac must verify")
+    _check(verify_mac(key, nonce, "esp32-a", mac.upper()), "mac compare is case-insensitive")
+    _check(not verify_mac(key, nonce, "esp32-b", mac),
+           "the same mac must NOT verify under another client_id")
+    _check(not verify_mac(key, "cd" * 16, "esp32-a", mac),
+           "the same mac must NOT verify against another nonce")
+    _check(not verify_mac(key, nonce, "esp32-a", mac[:31]), "a truncated mac must not verify")
+    _check(not verify_mac("", nonce, "esp32-a", mac), "an empty key must not verify")
+
+    srv = srv_for(key, nonce)
+    _check(srv == "4f8c924f99c82f32", "pinned srv vector changed: %r" % srv)
+    _check(verify_srv(key, nonce, srv), "a correct srv must verify")
+    _check(not verify_srv(key, nonce, "0" * 16), "a bogus srv must not verify")
+
+    ch = challenge(nonce, key=key)
+    _check(kind(ch) == "challenge", "challenge must classify as challenge")
+    _check(ch["alg"] == AUTH_ALG, "challenge must name the algorithm")
+    _check(ch["ttl_ms"] == AUTH_TTL_MS, "challenge must carry the ttl")
+    _check(verify_srv(key, ch["nonce"], ch["srv"]), "challenge must carry a valid srv")
+    _check(decode(encode(ch)) == ch, "challenge must survive the wire")
+    _check("srv" not in challenge(nonce), "challenge without a key carries no srv")
+
+    ans = auth(mac)
+    _check(kind(ans) == "auth", "auth must classify as auth")
+    _check(decode(encode(ans)) == ans, "auth must survive the wire")
+
+    _check(len(new_nonce()) == 32, "a nonce is 32 hex chars")
+    _check(new_nonce() != new_nonce(), "nonces must not repeat")
+
+
+def _selftest_hello_has_no_key():
+    """v0.6 hello advertises algorithms; it never carries the key."""
+    h = hello("esp32-a", "thin", 160, 80)
+    _check("token" not in h, "v0.6 hello must not carry token")
+    _check(h.get("auth") == [AUTH_ALG], "hello must advertise the auth algorithm")
+    legacy = hello("esp32-a", "thin", 160, 80, token="0123456789abcdef")
+    _check(legacy.get("token") == "0123456789abcdef",
+           "static-token mode must still be expressible")
+    _check("auth" not in legacy, "a static-token hello must not advertise hmac")
+
+
 def _selftest_cases():
     return [
         ("roundtrip", _selftest_roundtrip),
@@ -751,6 +913,8 @@ def _selftest_cases():
         ("is_stale", _selftest_is_stale),
         ("encode_wire", _selftest_encode_wire),
         ("builders", _selftest_builders),
+        ("auth", _selftest_auth),
+        ("hello_no_key", _selftest_hello_has_no_key),
     ]
 
 

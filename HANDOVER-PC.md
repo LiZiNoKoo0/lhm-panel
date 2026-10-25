@@ -10,11 +10,11 @@
 
 ## 0. 一句话状态
 
-**上位机功能全部可用，打包成 EXE 时卡在「窗口里是空白页」。**
+**上位机全部可用；打包成 EXE 的内嵌 WebView2 窗口已验通（2026-10-25 20:02）。**
 
 - daemon、webui、布局编辑器、真采集、回放、桌面终端——都已验过
-- EXE 能构建、能启动、三个部件（daemon / webui / bridge）都跑起来了
-- **但 EXE 打开的那个窗口没有显示仪表盘**，这是唯一未解决的问题
+- EXE 用 pywebview/WebView2 开自己的窗口，不再依赖 Edge；`--window-selftest` 把渲染结果写进日志作验收
+- 当前已知问题清单见 §2.3（四个坑均已修）和 §5
 
 ---
 
@@ -44,7 +44,15 @@
 
 ---
 
-## 2. 打包（未完成）—— 这是接手的第一件事
+## 2. 打包（已解决，2026-10-25 20:02）
+
+**`dist\PC-Monitor.exe` 现在用内嵌 WebView2 显示仪表盘，不再依赖 Edge。**
+自检证据（`dist\PC-Monitor.log`）：
+
+```
+window probe: {"title":"PC-Monitor · 上位机仪表盘","kpis":4,"badge":"实时","chars":328}
+=== exit: code=0 ===
+```
 
 ### 2.1 已经解决的三个问题
 
@@ -80,48 +88,34 @@ PyInstaller 下 `fake_daemon.__file__` 指向 `_MEIPASS`，daemon 就把 token �
 
 **已改**：启动器持有 token（断掉第 1 步）；主线程 `while True` 保活（断掉第 2 步）。
 
-### 2.3 当前卡点：窗口是空白页
+### 2.3 为什么曾经是空白页，以及四个真坑（都已修）
 
-窗口起来了（Edge `--app=` 模式，6 个进程带 `--user-data-dir=…\browser-profile`），
-**但页面是空白**，用户描述「长得跟 edge 的似的」——即 Edge 自己的空白页，不是仪表盘。
+当初的空白页其实是 **Edge 的首启/同步确认页**：`--app=` 页面确实加载了（CDP 能看到
+`PC-Monitor · 上位机仪表盘`），但新 profile 弹的 `edge://sync-confirmation-dialog/` 盖在上面。
+结论：不再和 Edge 的 profile 机制搏斗，改用 **pywebview 内嵌 WebView2**。接手时踩过的四个坑：
 
-**已验证不是服务端问题**（全部返回 200）：
-```
-/               200  17158
-/tokens.css     200  15623
-/editor.js      200  22009
-/app.js         200  29424
-/api/font       200   4074
-/api/state      200   1491
-/api/layout     200     21
-```
+| # | 症状 | 真因 | 修法 |
+|---|---|---|---|
+| 1 | `Failed to resolve Python.Runtime.Loader.Initialize from ...\_MEI...\pythonnet\runtime\Python.Runtime.dll` | pythonnet 默认选 .NET Framework，onefile 包里加载不了 netstandard2.0 的 Python.Runtime.dll（源码环境是好的，所以「刚才明明好了」） | `launcher._prepare_dotnet()`：写 `PC-Monitor.exe.config`，按 `netfx→coreclr→default` 顺序试，探针是 `clr.AddReference('System.Windows.Forms')` + `from Microsoft.Win32 import SystemEvents` |
+| 2 | `Could not load file or assembly 'System.Windows.Forms'`（coreclr 下） | WinForms 在 `Microsoft.WindowsDesktop.App` 里，pythonnet 自动生成的 runtimeconfig 只声明了 `Microsoft.NETCore.App` | 生成 runtimeconfig 同时声明两个 framework，版本号从 `%ProgramFiles%\dotnet\shared\Microsoft.WindowsDesktop.App` 现场读 |
+| 3 | `You must have pythonnet installed in order to use pywebview`（误导性最强） | `webview.guilib.try_import` 只 catch `ImportError`，把 .NET 异常吞了；webview 子模块缺失也报这条 | launcher 自己先 `import webview.platforms.winforms`（真异常进日志）；spec 用 `collect_submodules('webview')` |
+| 4 | `AttributeError: 'NoneType' object has no attribute 'GetMethod'`（winforms.py 668/680） | **pywebview 6.2.1 的 bug，与打包无关**：`OpenFolderDialog` 在类定义时反射 `FileDialogNative+IFileDialog`，.NET Core WinForms 没有这个类型，源码下一样炸 | `tools/fix_pywebview.py`：幂等补丁，把该块包进 try/except，文件夹选择器不可用时 `show()` 报清晰错误；`--revert` 可还原；留 `.bak` |
 
-**当前假设**：全新的 `--user-data-dir` 触发 Edge 首次运行流程，忽略 `--app=` 的导航。
+**重新构建前必须先跑** `python tools\fix_pywebview.py`（site-packages 被重装就会退回未补丁状态）。
 
-**已改但未验证**：加了
-```
---no-first-run
---no-default-browser-check
---disable-features=msEdgeIdentityFRE,EdgeCollectionsFRE
---noerrdialogs
-```
-并把就绪判定改成「必须拿到 HTTP 200 且读到字节」，失败会在 `PC-Monitor.log` 里留 `webui ready=false`。
+### 2.4 构建与自检（现在用这个）
 
-### 2.4 下一步（按顺序）
-
-1. **重新构建并验证窗口** —— `launcher.py` 已改好，只差一次 build + 看一眼
-2. 若仍空白：在那个窗口按 `Ctrl+Shift+I`，看 Console 报什么
-3. 若 Edge app 模式始终不听话，备选：
-   - `--windowed` + 修好 pywebview 的 .NET 后端（需要 `pythonnet` + WebView2 程序集正确打包，
-     第一次尝试在 `webview/platforms/winforms.py` 导入阶段就失败）
-   - 或者干脆放弃内嵌，做成「托盘程序 + 打开默认浏览器」，把预期讲清楚
-4. 构建命令（当前用的）：
 ```powershell
-pyinstaller --onefile --noconfirm --name PC-Monitor `
-  --add-data "pcmon/webstatic;pcmon/webstatic" `
-  --add-binary "H:\tools\lhm\lhm_bridge.exe;." `
-  launcher.py
+python tools\fix_pywebview.py                       # 补丁 site-packages（幂等）
+pyinstaller --noconfirm --clean --distpath dist --workpath build PC-Monitor.spec
+# 自检：窗口自动打开、把渲染结果写进日志、然后自己关闭
+dist\PC-Monitor.exe --source fake --window webview --window-selftest
+Get-Content dist\PC-Monitor.log     # 期望 window probe: {"title":"PC-Monitor · 上位机仪表盘",...}
 ```
+
+自检探针是**验收的唯①证据**：没有它，脚本无法区分「窗口在工作」和「窗口是白的」——
+正是本项目第一次翻车的地方。spec 里的 upx 保持开着（这台机器 PATH 上没有 upx，实际未压缩；
+若将来启用了 upx，必须把 .NET 程序集排除，否则会复现坑 1 的症状）。
 
 ---
 
@@ -176,16 +170,16 @@ Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |
 
 | 项 | 说明 |
 |---|---|
-| **EXE 窗口显示** | 见 §2.3 / §2.4，唯一阻塞项 |
 | 协议 v0.5 的 PC 义务 | `catalog` 带 `source: local\|remote`、不对 `local.*` 发 `data`、`link.alive`。**要等固件 L 系列有 `peripherals` 才有东西可测** |
 | 编辑器「可选中」勾选框 | 现在造 `focusable` 页面只能用 API（`POST /api/layout/apply`） |
 | `daemon.capabilities()` | 已写好（读终端声明的能力），但**没有任何调用者**——是一段没接线的代码 |
 | M3 的 Tk 窗口 | `--selftest` 全过，但**没人亲眼看过那个窗口长什么样** |
+| 配对/多设备（李子的提案） | 多 token 注册表（按 token 作主键、MAC 作显示名）→ 串口配对工具 → 固件生成 token；设计讨论见会话记录，未动工 |
+| console=True 可改 windowed | launcher 已兜住 `sys.stdout is None`，想去掉黑控制台时改 spec 的 `console=False` 即可 |
 
 ---
 
 ## 6. 一句话给下一个人
 
-上位机是能用的，只有「打包成 EXE 后窗口里是空白」这一件事没解决。
-崩因（`0xC0000409`）已经查清并修掉，现在只是 Edge app 模式不导航。
-**别再杀 `msedge` 全部进程。**
+EXE 的窗口问题已经结案：**pywebview + WebView2，`--window-selftest` 是验收证据，重建前先跑 `tools/fix_pywebview.py`**。
+认证还是静态共享 token（不是挑战应答），且 exe 与板子的 token 必须一致——用 `--token ***。**别再杀 `msedge` 全部进程。**

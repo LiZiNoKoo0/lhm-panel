@@ -122,7 +122,11 @@ SPAWN_WAIT_S = 6.0
 SELFTEST_UI_WAIT_S = 5.0
 SELFTEST_SETTLE_S = 0.4
 SELFTEST_TOTAL_S = 4.0
-SELFTEST_TOKEN = "selftest"
+#: The selftest daemon and this terminal share this key (PROTOCOL.md s.2.4).
+#: Fixed on purpose: the selftest must be repeatable, and the key never leaves
+#: this machine -- a real pairing mints a random one.
+SELFTEST_KEY = "5e1f7c3a9b2d48e6a0c4f8b1d3e50729"
+SELFTEST_DEVICES_NAME = "term_tk_selftest_devices.json"
 
 _HEX_COLOR = re.compile(r"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
 
@@ -198,7 +202,9 @@ class Net(threading.Thread):
         self.port = int(port)
         self.token = token
         self.client_id = client_id
-        self._stop = threading.Event()
+        #: Do NOT call this `_stop`: Thread._stop() is internal, and
+        #: overriding it breaks is_alive()/join() once the thread ends.
+        self._halt = threading.Event()
         self._sock = None
         self._pending = collections.deque()
         self._pending_lock = threading.Lock()
@@ -222,7 +228,7 @@ class Net(threading.Thread):
 
     def stop(self):
         """Ask the thread to finish and tear the socket down."""
-        self._stop.set()
+        self._halt.set()
         self._kill_socket()
 
     # -- internals --------------------------------------------------------
@@ -253,7 +259,7 @@ class Net(threading.Thread):
             "thin",
             DISPLAY_W,
             DISPLAY_H,
-            token=self.token,
+            auth=list(protocol.AUTH_ALGS),
             depth=DISPLAY_DEPTH,
             charset=CHARSET,
             accept=["ui", "data"],
@@ -267,11 +273,11 @@ class Net(threading.Thread):
 
     def run(self):
         attempt = 0
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             if self._connect():
                 attempt = 0
                 reason = self._read_loop()
-                if self._stop.is_set() or self._denied:
+                if self._halt.is_set() or self._denied:
                     break
                 if not reason:
                     reason = "connection closed"
@@ -281,7 +287,7 @@ class Net(threading.Thread):
             attempt += 1
             self._emit("link", up=False, reason=reason, delay=delay,
                        host=self.host, port=self.port)
-            if self._stop.wait(delay):
+            if self._halt.wait(delay):
                 break
         self._kill_socket()
 
@@ -338,7 +344,7 @@ class Net(threading.Thread):
         sock = self._sock
         buf = b""
         last_ping = time.monotonic()
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             if time.monotonic() - last_ping >= PING_INTERVAL_S:
                 last_ping = time.monotonic()
                 self.send({"t": "ping"})     # keeps a half-dead link detectable
@@ -382,6 +388,9 @@ class Net(threading.Thread):
         if kind is None:
             self._emit("unknown")           # section 20: ignore unknown "t"
             return
+        if kind == "challenge":
+            self._answer_challenge(msg)
+            return
         if kind == "deny":
             # A bad token is a configuration problem: stop, do not hammer.
             self._denied = True
@@ -389,6 +398,26 @@ class Net(threading.Thread):
             self._emit("deny", reason=reason if isinstance(reason, str) else "")
             return
         self._emit("msg", kind=kind, msg=msg)
+
+    def _answer_challenge(self, msg):
+        """PROTOCOL.md s.2.1: prove we hold the key, without sending it.
+
+        `srv` is checked first. If it does not verify, the thing on the other
+        end does not hold the key either, so answering would hand a valid mac
+        to an impostor -- stop instead.
+        """
+        nonce = msg.get("nonce")
+        if not isinstance(nonce, str) or not nonce:
+            self._emit("bad_challenge")
+            return
+        srv = msg.get("srv")
+        if isinstance(srv, str) and not protocol.verify_srv(self.token, nonce, srv):
+            self._denied = True
+            self._emit("deny", reason="daemon failed the srv check (impostor?)")
+            return
+        mac = protocol.mac_for(self.token, nonce, self.client_id)
+        self.send(protocol.auth(mac))
+        self._emit("auth_sent", alg=msg.get("alg"))
 
 
 # ---------------------------------------------------------------------------
@@ -1010,13 +1039,47 @@ def _scratch_paths():
             os.path.join(base, "term_tk_selftest_" + stamp + ".err"))
 
 
-def _spawn_daemon(host, port, out_path, err_path):
+def _free_port(host, start, tries=50):
+    """First port in [start, start+tries) nobody is listening on.
+
+    The selftest spawns its own daemon; if the default port is already taken it
+    would connect to a stranger and report that stranger's verdict as ours.
+    That happened for real (a packaged PC-Monitor.exe held 7802) and cost an
+    hour of blaming the handshake.
+    """
+    for offset in range(tries):
+        port = start + offset
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((host, port))
+        except OSError:
+            continue
+        finally:
+            probe.close()
+        return port
+    return start
+
+
+def _write_selftest_devices(path):
+    """Pair the selftest client with the selftest daemon (s.2.4).
+
+    A file, not an in-memory table: the daemon is a separate process and reads
+    its device table from disk, exactly as a real deployment does.
+    """
+    from pcmon.devices import DeviceTable
+
+    DeviceTable(path).add(CLIENT_ID + "-selftest", key=SELFTEST_KEY,
+                          note="term_tk selftest")
+    return path
+
+
+def _spawn_daemon(host, port, out_path, err_path, devices_path):
     """Start fake_daemon.py as a child process (never Start-Process)."""
     if not os.path.isfile(DAEMON_SCRIPT):
         print("daemon script not found: " + DAEMON_SCRIPT)
         return None
-    cmd = [sys.executable, DAEMON_SCRIPT, "--lenient", "--port", str(port),
-           "--token", SELFTEST_TOKEN, "--seed", "1"]
+    cmd = [sys.executable, DAEMON_SCRIPT, "--port", str(port),
+           "--auth", "hmac", "--devices", devices_path, "--seed", "1"]
     try:
         out_file = open(out_path, "wb")
         err_file = open(err_path, "wb")
@@ -1128,7 +1191,18 @@ def run_selftest(args):
     try:
         out_path, err_path = _scratch_paths()
         if not args.no_spawn:
-            proc = _spawn_daemon(args.host, args.port, out_path, err_path)
+            scratch = (SELFTEST_TMP_DIR if os.path.isdir(SELFTEST_TMP_DIR)
+                       else tempfile.gettempdir())
+            devices_path = _write_selftest_devices(
+                os.path.join(scratch, SELFTEST_DEVICES_NAME))
+            args.token = SELFTEST_KEY          # the key the daemon will check
+            if _port_open(args.host, args.port):
+                chosen = _free_port(args.host, args.port + 1)
+                print("NOTE port %d is busy (someone else's daemon); "
+                      "using %d for this selftest" % (args.port, chosen))
+                args.port = chosen
+            proc = _spawn_daemon(args.host, args.port, out_path, err_path,
+                                 devices_path)
             reachable = _port_open(args.host, args.port)
             detail = "" if reachable else "daemon never opened %s:%d" % (args.host, args.port)
             check("daemon_reachable", reachable, detail)

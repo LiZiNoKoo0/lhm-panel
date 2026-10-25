@@ -21,6 +21,10 @@ pub enum State {
     /// Socket is up, `hello` is out, waiting for the daemon's first word.
     Greeting,
     /// The daemon sent `catalog`: it knows us and will send `ui`/`data`.
+    /// The daemon sent challenge: our hello was understood and it wants
+    /// proof that we hold the key (PROTOCOL s.2.1). Not Ready yet -- nothing
+    /// but the answer may be expected until it sends catalog.
+    Challenged,
     Ready,
 }
 
@@ -48,6 +52,9 @@ pub enum Line {
     Catalog(usize),
     /// Token rejected (PROTOCOL 搂5). The caller closes the socket; the reason
     /// text is fetched by the caller with `wire::str_field`.
+    /// The daemon's nonce (PROTOCOL s.2.1). The caller answers it with
+    /// uth::mac_into; this module holds no key and does no cryptography.
+    Challenge,
     Denied,
     /// `cmd` including `reset`. T6 acts on it; counted here so it is never
     /// silently folded into "other" while nobody is looking.
@@ -67,6 +74,7 @@ pub struct Counters {
     pub data: u32,
     pub ping: u32,
     pub command: u32,
+    pub challenge: u32,
     pub denied: u32,
     /// Lines that were not any known kind, including non-JSON noise.
     pub other: u32,
@@ -96,6 +104,7 @@ impl Session {
                 data: 0,
                 ping: 0,
                 command: 0,
+                challenge: 0,
                 denied: 0,
                 other: 0,
             },
@@ -158,6 +167,13 @@ impl Session {
             Some(b"cmd") => {
                 self.counters.command = self.counters.command.saturating_add(1);
                 Line::Command(0)
+            }
+            Some(b"challenge") => {
+                self.counters.challenge = self.counters.challenge.saturating_add(1);
+                if self.state == State::Greeting {
+                    self.state = State::Challenged;
+                }
+                Line::Challenge
             }
             Some(b"deny") => {
                 self.counters.denied = self.counters.denied.saturating_add(1);

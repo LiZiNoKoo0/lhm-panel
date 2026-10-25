@@ -9,6 +9,9 @@ venv/
 *.log
 tmp/
 daemon.token
+# ---- v0.6 device table: holds every terminal's key. Never commit it ----
+devices.json
+devices.json.tmp
 .daemon-token
 
 # ---- applied layouts: user work, but per-machine ----
