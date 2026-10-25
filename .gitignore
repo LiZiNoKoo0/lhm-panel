@@ -38,4 +38,7 @@ cap*.txt
 _child.txt
 reconnect_probe*
 run-*.bat.bak*
-
+# ---- PyInstaller output ----
+dist/
+build/
+*.spec
