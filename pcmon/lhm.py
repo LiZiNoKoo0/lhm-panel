@@ -48,7 +48,23 @@ import time
 # ---------------------------------------------------------------------------
 
 #: Default location of the console bridge (see tools/lhm_bridge/README.md).
-DEFAULT_BRIDGE_PATH = r"H:\tools\lhm\lhm_bridge.exe"
+def _default_bridge_path():
+    """Where lhm_bridge.exe lives.
+
+    Packaged by PyInstaller the bridge is unpacked beside the code in
+    ``sys._MEIPASS``, not at the development path -- a shipped exe that still
+    looked at ``H:\\tools\\lhm`` would report 'bridge not found' on every
+    machine except this one, and the daemon would publish an empty catalog
+    with no obvious reason why.
+    """
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(getattr(sys, "_MEIPASS", ""), "lhm_bridge.exe")
+        if os.path.exists(bundled):
+            return bundled
+    return r"H:\tools\lhm\lhm_bridge.exe"
+
+
+DEFAULT_BRIDGE_PATH = _default_bridge_path()
 
 #: Bridge frame cadence; also what we advertise as catalog interval_ms.
 BRIDGE_INTERVAL_MS = 1000
