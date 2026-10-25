@@ -507,6 +507,46 @@ pub fn page_data(t: &mut dyn Transport, keys: usize) {
     let _ = t.write_all(&line[..at]);
 }
 
+/// `PAGE restored scene=<n> ver=<v> nodes=<n>\n` -- a page came back from flash
+/// at boot, before any daemon existed.
+///
+/// Said out loud because "the panel drew something" is otherwise
+/// indistinguishable from "the daemon was quick": the whole point of T6c is that
+/// the picture is there *without* a PC, and only a line that names the source
+/// can prove which happened.
+pub fn page_restored(t: &mut dyn Transport, scene: u8, ver: u32, nodes: usize) {
+    let mut line = [0u8; 56];
+    let mut at = put(&mut line, b"PAGE restored scene=");
+    at += put_dec(&mut line[at..], scene as u32);
+    at += put(&mut line[at..], b" ver=");
+    at += put_dec(&mut line[at..], ver);
+    at += put(&mut line[at..], b" nodes=");
+    at += put_dec(&mut line[at..], nodes as u32);
+    at += put(&mut line[at..], b"\n");
+    let _ = t.write_all(&line[..at]);
+}
+
+/// `PAGE saved ver=<v>\n` -- the page is on flash and will come back next boot.
+pub fn page_saved(t: &mut dyn Transport, ver: u32) {
+    let mut line = [0u8; 32];
+    let mut at = put(&mut line, b"PAGE saved ver=");
+    at += put_dec(&mut line[at..], ver);
+    at += put(&mut line[at..], b"\n");
+    let _ = t.write_all(&line[..at]);
+}
+
+/// `PAGE save-failed ver=<v>\n` -- the page is on the glass but not on flash.
+///
+/// A separate word from `saved`, because the failure mode is silent otherwise:
+/// the user sees the new page, reboots, and gets the old one with no clue why.
+pub fn page_save_failed(t: &mut dyn Transport, ver: u32) {
+    let mut line = [0u8; 40];
+    let mut at = put(&mut line, b"PAGE save-failed ver=");
+    at += put_dec(&mut line[at..], ver);
+    at += put(&mut line[at..], b"\n");
+    let _ = t.write_all(&line[..at]);
+}
+
 /// `PAGE reject <reason>\n` -- a `ui`/`data` line was refused; the previous
 /// page stays. A refused page that repainted would look like a layout bug, so
 /// the board says out loud that it declined instead.

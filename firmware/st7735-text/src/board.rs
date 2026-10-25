@@ -67,6 +67,11 @@ pub const FLASH_SECTOR: u32 = 0x1000;
 /// T3 keeps one copy here. T4 adds a second sector and an A/B switch.
 pub const CREDS_SECTOR: u32 = NVS_START;
 
+/// T6c: the saved page lives in the two sectors after the credentials pair,
+/// inside the same `nvs` partition (0xB000 and 0xC000). Nothing else claims
+/// them, and they are the same 4 KB granularity the erase path already assumes.
+pub const LAYOUT_SECTOR: u32 = NVS_START + 2 * FLASH_SECTOR;
+
 // -- wifi (T3) ---------------------------------------------------------
 /// AP name is this prefix plus the last two MAC bytes: `st7735-c758`.
 pub const AP_SSID_PREFIX: &str = "st7735-";

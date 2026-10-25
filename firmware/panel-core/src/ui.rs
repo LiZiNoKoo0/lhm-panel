@@ -58,6 +58,26 @@ impl Id {
         Some(id)
     }
 
+    /// Raw bytes of the id, without copying. For the flash round-trip.
+    pub(crate) fn raw(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+
+    /// Length in bytes.
+    pub(crate) fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Rebuild an id from raw bytes, refusing anything that cannot be one.
+    pub(crate) fn from_raw(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > MAX_ID {
+            return None;
+        }
+        let mut id = Id { bytes: [0; MAX_ID], len: bytes.len() as u8 };
+        id.bytes[..bytes.len()].copy_from_slice(bytes);
+        Some(id)
+    }
+
     pub fn as_str(&self) -> &str {
         core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
     }
@@ -121,7 +141,7 @@ pub struct Node {
 }
 
 impl Node {
-    const EMPTY: Node = Node {
+    pub(crate) const EMPTY: Node = Node {
         kind: Kind::Text,
         x: 0,
         y: 0,
@@ -147,11 +167,11 @@ impl Node {
         (self.size as usize / FONT_SIZES[0] as usize).max(1)
     }
 
-    fn text_str(&self) -> &str {
+    pub(crate) fn text_str(&self) -> &str {
         core::str::from_utf8(&self.text[..self.text_len as usize]).unwrap_or("")
     }
 
-    fn unit_str(&self) -> &str {
+    pub(crate) fn unit_str(&self) -> &str {
         core::str::from_utf8(&self.unit[..self.unit_len as usize]).unwrap_or("")
     }
 }
@@ -285,6 +305,30 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// Build a layout from parts, for the flash round-trip.
+    ///
+    /// Layout::parse is the only other way to get one, and it needs JSON. A
+    /// saved page is a binary node table (SPEC S-6): the whole point of the
+    /// binary form is that booting does not have to run a parser, so there has
+    /// to be a way in that does not start from text.
+    ///
+    /// Returns None when there are more nodes than the table holds, rather
+    /// than silently truncating a page the user saved.
+    pub fn from_parts(scene: u8, ver: u32, bg: u16, nodes: &[Node]) -> Option<Self> {
+        if nodes.len() > MAX_NODES {
+            return None;
+        }
+        let mut layout = Layout {
+            scene,
+            ver,
+            bg,
+            nodes: [Node::EMPTY; MAX_NODES],
+            len: nodes.len() as u8,
+        };
+        layout.nodes[..nodes.len()].copy_from_slice(nodes);
+        Some(layout)
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes[..self.len as usize]
     }
@@ -938,6 +982,17 @@ impl Page {
             },
             Err(err) => Feed::Refused(err),
         }
+    }
+
+    /// Put a page on the glass without a ui message, for the flash restore.
+    ///
+    /// T6c: at boot the saved page is adopted before WiFi exists, so the panel
+    /// draws something true instead of a blank screen. The values table stays
+    /// empty on purpose -- every `num` then draws `--`, which is the honest
+    /// answer for a reading nobody has taken since power-on (PROTOCOL 22.3).
+    pub fn adopt(&mut self, layout: Layout) {
+        self.layout = Some(layout);
+        self.dirty = true;
     }
 
     /// True once a page has been accepted: the self-test card must give way.

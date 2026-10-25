@@ -1,4 +1,4 @@
-﻿//! Board-independent core of the text panel.
+//! Board-independent core of the text panel.
 //!
 //! What this crate does NOT do: no SPI, no UART, no flash, no pins, no delays,
 //! no allocator, no logging. It turns text into a 160x80 RGB565 frame and
@@ -19,6 +19,7 @@ pub mod discover;
 pub mod font8x16;
 pub mod json;
 pub mod link;
+pub mod saved;
 pub mod scene;
 pub mod sector;
 pub mod session;

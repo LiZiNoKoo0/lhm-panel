@@ -116,6 +116,11 @@ struct Ui {
     /// The daemon link's render-side half: two channel handles and an atomic.
     /// Present even when no daemon exists -- `is_up()` is then simply false.
     tcp: net_link::TcpLink,
+    /// The page that was on the glass last time the board lost power (T6c).
+    ///
+    /// Read in `main` before the store moves into the network task, then handed
+    /// over here so the panel can draw before WiFi exists (PROTOCOL 22.3).
+    saved: Option<panel_core::ui::Layout>,
 }
 
 // `bench-colours` halts right after the bars, so the rest of main is unreachable
@@ -243,7 +248,7 @@ fn main() -> ! {
     // "open the hotspot" case. A layout mismatch is logged once, here.
     st(12);
     let flash = FlashStorage::new(peripherals.FLASH);
-    let (store, creds) = match store::Store::open(flash) {
+    let (mut store, creds) = match store::Store::open(flash) {
         Ok(mut store) => {
             let opened = store.load();
 
@@ -339,6 +344,12 @@ fn main() -> ! {
         }
     };
 
+    // T6c: read the saved page here, while the store is still ours. `net_task`
+    // takes ownership below (the chip has one flash, so the firmware has one
+    // owner for it), which makes this the last moment the UI side can ask what
+    // was on the glass before the power went away.
+    let saved_page = store.as_mut().and_then(|s| s.load_layout());
+
     // The scheduler is up; hand over to the async world. `executor.run` never
     // returns, which is why the executor may live on this stack.
     st(13);
@@ -350,6 +361,7 @@ fn main() -> ! {
                 lcd,
                 transport,
                 tcp: net_link::TcpLink::new(),
+                saved: saved_page,
             })
             .unwrap(),
         );
@@ -378,7 +390,20 @@ async fn ui_task(mut ui: Ui) -> ! {
     // readings. A local, not a field of `Ui`, because the dispatch below borrows
     // `ui.transport`/`ui.tcp` for the whole `inbox.poll` call.
     let mut page = Page::new();
-    // T6c probe state (see the print site near the end of the loop).
+    // T6c: put the last page back before WiFi exists. Without this the panel is
+    // blank after every power cut until a PC happens to be running, and "the
+    // board is dead" and "the board is waiting" look identical on the glass.
+    let mut saved_ver = 0u32;
+    if let Some(saved) = ui.saved.take() {
+        saved_ver = saved.ver;
+        let (scene_no, ver_no, node_count) = (saved.scene, saved.ver, saved.len());
+        page.adopt(saved);
+        diag::page_restored(&mut ui.transport, scene_no, ver_no, node_count);
+    }
+    // Set inside the dispatch closure, acted on after it returns: that closure
+    // already borrows the transport and the inbox, and a flash erase in the
+    // middle of a half-dispatched frame is not a thing to do.
+    let mut save_request: Option<u32> = None;
     // Whether the badge is on the glass right now. Kept here rather than inside
     // the scene: the badge is not part of any layout, and a scene that had to
     // know about the link would be asking the wrong layer.
@@ -414,6 +439,13 @@ async fn ui_task(mut ui: Ui) -> ! {
                     Feed::Layout => {
                         let shown = page.layout().unwrap();
                         diag::page_ui(&mut sink, shown.scene, shown.ver, shown.len());
+                        // Only a `ver` that actually moved is worth a flash
+                        // erase. A daemon resends `ui` on every handshake
+                        // (PROTOCOL 16 red line 4) and none of those resends is
+                        // a change: `ver` is the daemon's word for "different".
+                        if shown.ver != saved_ver {
+                            save_request = Some(shown.ver);
+                        }
                     }
                     Feed::Data(keys) => diag::page_data(&mut sink, keys),
                     // Refused, not ignored: the old page stays on the glass, and
@@ -423,6 +455,26 @@ async fn ui_task(mut ui: Ui) -> ! {
                     Feed::Ignored => {}
                 },
             });
+        }
+
+        // Persist the page. Deliberately outside the dispatch closure and only
+        // on a `ver` change: an erase costs ~50 ms and a sector has a finite
+        // write budget, so this follows the operator's edits, not the frame
+        // rate. A failure leaves the picture alone and says so, because the
+        // silent version of this bug is "the new page survives until reboot".
+        if let Some(ver) = save_request {
+            let saved_ok = match page.layout() {
+                Some(layout) => crate::net::with_store(|s| s.save_layout(layout))
+                    .await
+                    .unwrap_or(false),
+                None => false,
+            };
+            if saved_ok {
+                saved_ver = ver;
+                diag::page_saved(&mut ui.transport, ver);
+            } else {
+                diag::page_save_failed(&mut ui.transport, ver);
+            }
         }
 
         // SPEC 4.9: a dead link must not blank the picture -- the last layout

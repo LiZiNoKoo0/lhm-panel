@@ -74,6 +74,21 @@ const MIN_ATTEMPT: Duration = Duration::from_secs(3);
 static CTRL: Mutex<CriticalSectionRawMutex, Option<WifiController<'static>>> = Mutex::new(None);
 static STORE: Mutex<CriticalSectionRawMutex, Option<Store<'static>>> = Mutex::new(None);
 
+/// Run `f` against the flash store, if one opened at boot.
+///
+/// The store is a single owned `FlashStorage`: the chip has one, so the firmware
+/// has one. Rather than hand a second handle to the UI task (impossible) or move
+/// the store back out of the network task (which needs it for the config page),
+/// the UI task borrows it through here for the one thing it owns -- persisting
+/// the page it just painted (T6c).
+///
+/// `None` means the store never opened, which is a boot-time failure already
+/// reported as `STORE fail`; callers treat it the same as a failed write.
+pub async fn with_store<R>(f: impl FnOnce(&mut Store<'static>) -> R) -> Option<R> {
+    let mut guard = STORE.lock().await;
+    guard.as_mut().map(f)
+}
+
 #[derive(Clone)]
 struct AppState {
     spawner: Spawner,

@@ -24,6 +24,8 @@ use alloc::string::String;
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_storage::FlashStorage;
 use panel_core::creds::{self, WifiCreds};
+use panel_core::saved;
+use panel_core::ui::Layout;
 use panel_core::sector;
 
 use crate::board;
@@ -58,13 +60,21 @@ pub enum Slot {
 }
 
 impl Slot {
-    /// Sector address of this slot.
+    /// Sector address of this slot within the credentials pair.
     pub fn offset(self) -> u32 {
+        self.offset_in(board::CREDS_SECTOR)
+    }
+
+    /// Sector address of this slot within an A/B pair starting at `base`.
+    ///
+    /// There are two independent pairs on this chip now -- credentials and the
+    /// saved page -- and they must not each grow their own copy of the
+    /// "write the inactive one, verify, let seq decide" rule. B-2 was exactly
+    /// that mistake in another module.
+    pub fn offset_in(self, base: u32) -> u32 {
         match self {
-            // A is the sector T3 used, so a board upgraded from T3 finds its
-            // credentials exactly where it left them.
-            Slot::A => board::CREDS_SECTOR,
-            Slot::B => board::CREDS_SECTOR + board::FLASH_SECTOR,
+            Slot::A => base,
+            Slot::B => base + board::FLASH_SECTOR,
         }
     }
 
@@ -107,6 +117,12 @@ pub struct Opened {
 /// frame's CRC -- readers stop at the frame's own length field.
 const FRAME_BYTES: usize = sector::HEADER_LEN + creds::RECORD_LEN;
 const SLOT_BYTES: usize = (FRAME_BYTES + 3) & !3;
+
+/// A saved page is much larger than a credentials record: the sector payload
+/// holds up to `saved::MAX_LEN` bytes, so the frame buffer for that pair has
+/// to be sized for the page, not for the credentials.
+const LAYOUT_FRAME_BYTES: usize = sector::HEADER_LEN + saved::MAX_LEN;
+const LAYOUT_SLOT_BYTES: usize = (LAYOUT_FRAME_BYTES + 3) & !3;
 
 pub struct Store<'d> {
     flash: FlashStorage<'d>,
@@ -154,9 +170,12 @@ impl<'d> Store<'d> {
     }
 
     /// The slot's frame tag -- slot and `seq` only, no payload kept alive.
-    fn slot_copy(&mut self, slot: Slot) -> Option<Copy> {
-        let mut buf = [0u8; SLOT_BYTES];
-        self.flash.read(slot.offset(), &mut buf).ok()?;
+    fn slot_copy_at(&mut self, slot: Slot, base: u32) -> Option<Copy> {
+        // Sized for the largest frame the chip can hold (a page), so one code
+        // path serves both pairs; a credentials frame simply parses earlier and
+        // leaves the rest of the buffer unread.
+        let mut buf = [0u8; LAYOUT_SLOT_BYTES];
+        self.flash.read(slot.offset_in(base), &mut buf).ok()?;
         let frame = sector::parse(&buf)?;
         Some(Copy {
             slot,
@@ -167,11 +186,16 @@ impl<'d> Store<'d> {
     /// The winning copy, by `seq`. `None` means "nothing here is usable", which
     /// covers a blank chip, two damaged slots, and sectors holding something
     /// that is not ours.
-    fn best(&mut self) -> Option<Copy> {
-        match (self.slot_copy(Slot::A), self.slot_copy(Slot::B)) {
+    fn best_at(&mut self, base: u32) -> Option<Copy> {
+        match (self.slot_copy_at(Slot::A, base), self.slot_copy_at(Slot::B, base)) {
             (Some(a), Some(b)) => Some(if sector::is_newer(a.seq, b.seq) { a } else { b }),
             (a, b) => a.or(b),
         }
+    }
+
+    /// The winning credentials copy.
+    fn best(&mut self) -> Option<Copy> {
+        self.best_at(board::CREDS_SECTOR)
     }
 
     /// Read both slots, pick the winner, and decode the credentials it carries.
@@ -275,18 +299,29 @@ impl<'d> Store<'d> {
             Some(len) => len,
             None => return false,
         };
+        self.write_frame(target, board::CREDS_SECTOR, seq, &record[..len])
+    }
 
-        let mut frame = [0u8; SLOT_BYTES];
-        let total = match sector::seal(seq, &record[..len], &mut frame) {
+    /// Put `payload` into one slot of the pair at `base`, then prove it by
+    /// reading it back.
+    ///
+    /// Returns true only if the read-back parses, carries the bytes we sealed,
+    /// and is the copy a reader would now pick. Anything else -- erase refused,
+    /// write refused, a byte that came back different, a tie-break that still
+    /// prefers the other slot -- leaves the old copy in charge and reports
+    /// false, because "it said OK" is not evidence.
+    fn write_frame(&mut self, target: Slot, base: u32, seq: u32, payload: &[u8]) -> bool {
+        let mut frame = [0u8; LAYOUT_SLOT_BYTES];
+        let total = match sector::seal(seq, payload, &mut frame) {
             Some(total) => total,
             None => return false,
         };
-        debug_assert!(total <= SLOT_BYTES, "frame does not fit a slot");
+        debug_assert!(total <= LAYOUT_SLOT_BYTES, "frame does not fit a slot");
         // The driver writes whole words: round the write up, let the reader stop
         // at the frame's own `len`.
         let padded = (total + 3) & !3;
 
-        let start = target.offset();
+        let start = target.offset_in(base);
         if self.flash.erase(start, start + board::FLASH_SECTOR).is_err() {
             return false;
         }
@@ -301,18 +336,50 @@ impl<'d> Store<'d> {
             return false;
         }
 
-        let mut back = [0u8; SLOT_BYTES];
+        let mut back = [0u8; LAYOUT_SLOT_BYTES];
         if self.flash.read(start, &mut back).is_err() {
             return false;
         }
         match sector::parse(&back) {
-            Some(landed) if landed.seq == seq && landed.payload == &record[..len] => {}
+            Some(landed) if landed.seq == seq && landed.payload == payload => {}
             _ => return false,
         }
 
-        // And the tie-break has to agree: if `load` would not pick what we just
-        // wrote, the save did not succeed in any sense the caller cares about.
-        matches!(self.best(), Some(c) if c.slot == target && c.seq == seq)
+        // And the tie-break has to agree: if a reader would not pick what we
+        // just wrote, the save did not succeed in any sense the caller cares
+        // about.
+        matches!(self.best_at(base), Some(c) if c.slot == target && c.seq == seq)
+    }
+
+    // -- saved page (T6c) ----------------------------------------------
+
+    /// The page that was on the glass when the board last lost power, or `None`
+    /// when nothing has been saved yet.
+    ///
+    /// This is what lets the panel draw before WiFi is up and before any daemon
+    /// has said hello -- PROTOCOL 22's "layout is persistent" half. Values are
+    /// deliberately not restored: they come back as `--` until a daemon sends
+    /// `data`, which is the honest answer for a reading nobody has taken yet.
+    pub fn load_layout(&mut self) -> Option<Layout> {
+        let copy = self.best_at(board::LAYOUT_SECTOR)?;
+        let mut buf = [0u8; LAYOUT_SLOT_BYTES];
+        self.flash.read(copy.slot.offset_in(board::LAYOUT_SECTOR), &mut buf).ok()?;
+        let frame = sector::parse(&buf)?;
+        let body = &buf[sector::HEADER_LEN..sector::HEADER_LEN + frame.payload.len()];
+        saved::decode(body)
+    }
+
+    /// Persist a page. Only called when the daemon's `ver` actually moved, so
+    /// the flash wear follows the user's edits, not the frame rate.
+    pub fn save_layout(&mut self, layout: &Layout) -> bool {
+        let mut payload = [0u8; saved::MAX_LEN];
+        let Some(len) = saved::encode(layout, &mut payload) else {
+            return false;
+        };
+        let active = self.best_at(board::LAYOUT_SECTOR);
+        let target = active.map(|c| c.slot.other()).unwrap_or(Slot::A);
+        let seq = active.map(|c| c.seq.wrapping_add(1)).unwrap_or(1);
+        self.write_frame(target, board::LAYOUT_SECTOR, seq, &payload[..len])
     }
 
     /// Write half a frame into `start` and reset, simulating the power cut
