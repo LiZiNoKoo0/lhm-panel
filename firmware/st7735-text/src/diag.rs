@@ -547,6 +547,22 @@ pub fn page_save_failed(t: &mut dyn Transport, ver: u32) {
     let _ = t.write_all(&line[..at]);
 }
 
+/// `FOCUS <key> pos=<n>\n` -- a key was pressed and the selection moved.
+///
+/// On the wire because the interesting failure is silent: the highlight can be
+/// wrong (off by one, clamped against a stale page) while every frame still
+/// looks plausible. The position the terminal *believes* it is on is the number
+/// the daemon will act on, so it is the number worth printing.
+pub fn focus_press(t: &mut dyn Transport, key: &str, pos: u8) {
+    let mut line = [0u8; 40];
+    let mut at = put(&mut line, b"FOCUS ");
+    at += put(&mut line[at..], key.as_bytes());
+    at += put(&mut line[at..], b" pos=");
+    at += put_dec(&mut line[at..], pos as u32);
+    at += put(&mut line[at..], b"\n");
+    let _ = t.write_all(&line[..at]);
+}
+
 /// `PAGE reject <reason>\n` -- a `ui`/`data` line was refused; the previous
 /// page stays. A refused page that repainted would look like a layout bug, so
 /// the board says out loud that it declined instead.

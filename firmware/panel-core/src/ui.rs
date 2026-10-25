@@ -120,6 +120,15 @@ pub struct Node {
     pub h: u16,
     /// `text`/`num`: one of `FONT_SIZES`, already snapped by the parser.
     pub size: u8,
+    /// This node can be picked by a key/encoder terminal (PROTOCOL 11.5).
+    ///
+    /// The terminal paints a highlight around it and reports which one is
+    /// selected. It never learns what the node *means* -- that mapping stays on
+    /// the daemon, which is what lets the same firmware drive a page whose
+    /// button means "next page" today and "shut down" tomorrow.
+    pub focusable: bool,
+    /// Explicit 1-based focus index; 0 means "number me in draw order".
+    pub focus: u8,
     /// Fill for `rect`, ink for `text`/`num`.
     pub colour: u16,
     /// `rect` outline, if the node had `color` as well as `fill`.
@@ -148,6 +157,8 @@ impl Node {
         w: 0,
         h: 0,
         size: FONT_SIZES[0],
+        focusable: false,
+        focus: 0,
         colour: 0xFFFF,
         border: None,
         text: [0; MAX_TEXT],
@@ -459,6 +470,25 @@ impl Layout {
     }
 }
 
+/// Outline `rect` by one pixel, in the panel's highlight colour.
+///
+/// Four thin fills rather than a stroke primitive: `Canvas` has no stroke, and
+/// adding one for a single caller would put a drawing rule in a place that knows
+/// nothing about focus. The colour is deliberately the brightest thing available
+/// -- the highlight has to be findable at a glance on a page someone else
+/// designed, and "a slightly different shade of grey" is not findable.
+fn draw_focus_box(canvas: &mut Canvas<'_>, x: i16, y: i16, w: u16, h: u16) {
+    const INK: u16 = 0xFFFF;
+    let (cw, ch) = (canvas.width(), canvas.height());
+    if w == 0 || h == 0 {
+        return;
+    }
+    fill(canvas, cw, ch, x, y, w, 1, INK);
+    fill(canvas, cw, ch, x, y + h as i16 - 1, w, 1, INK);
+    fill(canvas, cw, ch, x, y, 1, h, INK);
+    fill(canvas, cw, ch, x + w as i16 - 1, y, 1, h, INK);
+}
+
 /// Fill a node rectangle, clipped to the canvas.
 ///
 /// `Canvas::fill_rect` speaks `usize` and treats off-canvas as a bug; a page may
@@ -524,6 +554,12 @@ fn parse_node(raw: &[u8]) -> Result<Node, Error> {
         Kind::Rect => {
             node.w = uint(f.get(b"w"))?;
             node.h = uint(f.get(b"h"))?;
+            node.focusable = matches!(f.get(b"focusable"), Some(b"true"));
+            node.focus = f
+                .get(b"focus")
+                .and_then(json::as_i64)
+                .map(|v| v.clamp(0, 255) as u8)
+                .unwrap_or(0);
             // `fill` is the inside, `color` the outline; either alone is legal.
             node.colour = match f.get(b"fill") {
                 Some(raw) => colour(raw)?,
@@ -907,6 +943,13 @@ pub struct Page {
     /// The renderer already knows which nodes it drew with a value; recording it
     /// costs one word and removes the guess (T6c, 2026-10-25: `lp=26299 st=23294`
     /// froze the last number on the glass forever).
+    /// The 1-based focus position among `focusable` nodes; 0 = not shown yet.
+    ///
+    /// Stored as a position, not a node index: when a new page arrives the
+    /// focusable set can change (PROTOCOL 11.5 requires it to be re-clamped, or
+    /// the highlight sits on a button that no longer exists and every key press
+    /// looks broken while the daemon log is perfectly normal).
+    focus: u8,
     painted: u32,
 }
 
@@ -917,8 +960,72 @@ impl Page {
             values: Values::EMPTY,
             catalog: Catalog::EMPTY,
             dirty: false,
+            focus: 0,
             painted: 0,
         }
+    }
+
+    /// How many nodes on this page can be selected.
+    pub fn focus_count(&self) -> u8 {
+        self.layout
+            .as_ref()
+            .map(|l| l.nodes().iter().filter(|n| n.focusable).count() as u8)
+            .unwrap_or(0)
+    }
+
+    /// The 1-based focus position, clamped to the current page.
+    ///
+    /// Clamping on read rather than on write means a page that changed under the
+    /// focus cannot leave it pointing past the end -- the "everything looks fine
+    /// but nothing responds" failure PROTOCOL 11.5 warns about.
+    pub fn focus_position(&self) -> u8 {
+        let count = self.focus_count();
+        if count == 0 {
+            return 0;
+        }
+        if self.focus == 0 || self.focus > count {
+            1
+        } else {
+            self.focus
+        }
+    }
+
+    /// Move the selection by `delta`, wrapping at both ends.
+    ///
+    /// Wrapping rather than stopping: a four-item page reached by two buttons
+    /// has no other way back to the first item, and "press up a lot" beating on
+    /// a dead end is worse than going round.
+    pub fn focus_step(&mut self, delta: i8) {
+        let count = self.focus_count();
+        if count == 0 {
+            self.focus = 0;
+            return;
+        }
+        let current = self.focus_position() as i16;
+        let mut next = current + delta as i16;
+        while next < 1 {
+            next += count as i16;
+        }
+        while next > count as i16 {
+            next -= count as i16;
+        }
+        self.focus = next as u8;
+        self.dirty = true;
+    }
+
+    /// The focused node's rectangle, for the highlight box.
+    pub fn focus_rect(&self) -> Option<(i16, i16, u16, u16)> {
+        let position = self.focus_position();
+        if position == 0 {
+            return None;
+        }
+        let layout = self.layout.as_ref()?;
+        layout
+            .nodes()
+            .iter()
+            .filter(|n| n.focusable)
+            .nth(position as usize - 1)
+            .map(|n| (n.x, n.y, n.w, n.h))
     }
 
     /// Take one protocol line. This is the only way the page changes.
@@ -1029,6 +1136,12 @@ impl Page {
         let mut painted = 0u32;
         if let Some(layout) = &self.layout {
             layout.render(canvas, &self.values, now_ms);
+            // The highlight goes last so no node can paint over it: a focus box
+            // that a later rect hides is worse than none, because the operator
+            // presses a key, sees nothing move, and concludes the key is dead.
+            if let Some((x, y, w, h)) = self.focus_rect() {
+                draw_focus_box(canvas, x, y, w, h);
+            }
             for (index, node) in layout.nodes().iter().enumerate().take(MAX_NODES) {
                 if node.kind == Kind::Num
                     && self.values.get(&node.bind, now_ms, node.interval_ms).is_some()

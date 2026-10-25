@@ -43,7 +43,7 @@ pub const HELLO: &str = concat!(
     // telling the daemon a capability this board does not have.
     "\"primitives\":[\"rect\",\"text\",\"num\"],",
     "\"fonts\":[16,32,48],",
-    "\"input\":[],",
+    "\"input\":[\"key\"],",
     "\"limits\":{\"max_nodes\":32,\"max_json_bytes\":1024,\"max_text_len\":20}}"
 );
 
@@ -62,7 +62,7 @@ pub const HELLO_TAIL: &str = concat!(
     "\"charset\":\"ascii\",",
     "\"primitives\":[\"rect\",\"text\",\"num\"],",
     "\"fonts\":[16,32,48],",
-    "\"input\":[],",
+    "\"input\":[\"key\"],",
     "\"limits\":{\"max_nodes\":32,\"max_json_bytes\":1024,\"max_text_len\":20}}"
 );
 
@@ -284,7 +284,7 @@ mod tests {
         // magnification. Declaring them here is what lets the editor offer
         // them instead of guessing (T6c follow-up, 2026-10-25).
         // No input devices yet: the daemon must not send focusable nodes.
-        assert!(HELLO.contains("\"input\":[]"));
+        assert!(HELLO.contains("\"input\":[\"key\"]"));
         assert!(!HELLO.contains("\"widgets\""));
     }
 

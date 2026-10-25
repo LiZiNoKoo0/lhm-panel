@@ -41,7 +41,7 @@ extern crate alloc;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::delay::Delay;
-use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::gpio::{Input, Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::spi::Mode as SpiMode;
@@ -64,6 +64,7 @@ mod diag;
 mod link;
 mod log;
 mod net;
+mod keys;
 mod net_link;
 mod panel;
 mod store;
@@ -121,6 +122,9 @@ struct Ui {
     /// Read in `main` before the store moves into the network task, then handed
     /// over here so the panel can draw before WiFi exists (PROTOCOL 22.3).
     saved: Option<panel_core::ui::Layout>,
+    /// The four breadboard keys (T6d). Owned here because the pins are handed
+    /// out once, in `main`, and only the render loop reads them.
+    keys: keys::Keys<'static>,
 }
 
 // `bench-colours` halts right after the bars, so the rest of main is unreachable
@@ -344,6 +348,17 @@ fn main() -> ! {
         }
     };
 
+    // T6d: the four keys, pull-ups on. Built here because `peripherals` is only
+    // handed out in `main`; the render loop is the only reader.
+    let key_cfg = keys::Keys::config();
+    let keys = keys::Keys::new(
+        Input::new(peripherals.GPIO32, key_cfg),
+        Input::new(peripherals.GPIO33, key_cfg),
+        Input::new(peripherals.GPIO25, key_cfg),
+        Input::new(peripherals.GPIO26, key_cfg),
+        sys::now_ms(),
+    );
+
     // T6c: read the saved page here, while the store is still ours. `net_task`
     // takes ownership below (the chip has one flash, so the firmware has one
     // owner for it), which makes this the last moment the UI side can ask what
@@ -362,6 +377,7 @@ fn main() -> ! {
                 transport,
                 tcp: net_link::TcpLink::new(),
                 saved: saved_page,
+                keys,
             })
             .unwrap(),
         );
@@ -455,6 +471,35 @@ async fn ui_task(mut ui: Ui) -> ! {
                     Feed::Ignored => {}
                 },
             });
+        }
+
+        // T6d: keys move the focus and the daemon is told which item is
+        // selected. A terminal without keys never reaches here, and a page with
+        // nothing focusable makes `focus_step` a no-op that still reports
+        // position 0 -- so pressing keys on a read-only page costs nothing.
+        let now = sys::now_ms();
+        if let Some(press) = ui.keys.poll(now) {
+            match press {
+                keys::Press::Up => page.focus_step(-1),
+                keys::Press::Down => page.focus_step(1),
+                // Confirm and Back move nothing; they only report. Acting on
+                // them is the daemon's job, and it needs the position to do it.
+                keys::Press::Confirm | keys::Press::Back => {}
+            }
+            let position = page.focus_position();
+            let name = match press {
+                keys::Press::Up => "up",
+                keys::Press::Down => "down",
+                keys::Press::Confirm => "ok",
+                keys::Press::Back => "back",
+            };
+            diag::focus_press(&mut ui.transport, name, position);
+            if position > 0 {
+                let mut line = [0u8; 48];
+                if let Some(len) = keys::focus_event(&mut line, position) {
+                    let _ = ui.tcp.write_all(&line[..len]);
+                }
+            }
         }
 
         // Persist the page. Deliberately outside the dispatch closure and only
