@@ -53,3 +53,4 @@ build/
 tls/
 *.key
 *.pem
+_captured.ndjson
