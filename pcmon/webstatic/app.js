@@ -42,6 +42,10 @@ let history = {};
 //: with "Cannot access 'keyStoreError' before initialization" before issuing a
 //: single request.
 let keyStoreError = '';
+
+//: The paired key, kept in memory because navigation is where it was lost:
+//: private-mode browsers keep site data for one document only.
+let memoryKey = '';
 let searchTerm = '';
 
 const el = (id) => document.getElementById(id);
@@ -883,6 +887,7 @@ boot().catch((err) => {
 const KEY_STORE = 'pcmon.key';
 
 function pairedKey() {
+  if (memoryKey) return memoryKey;
   try {
     const kept = localStorage.getItem(KEY_STORE);
     if (kept) return kept;
@@ -901,6 +906,7 @@ function pairedKey() {
 /** Store the key and prove it stuck. Returns true only after a read-back. */
 function storeKey(value) {
   keyStoreError = '';
+  memoryKey = value;      // in memory first: persistence is optional
   if (!value) {
     try { localStorage.removeItem(KEY_STORE); } catch (err) { /* ignore */ }
     try { sessionStorage.removeItem(KEY_STORE); } catch (err) { /* ignore */ }
@@ -929,7 +935,7 @@ function storeKey(value) {
     keyStoreError += '; sessionStorage: ' +
       (err && err.message ? err.message : err);
   }
-  return false;
+  return true;            // memoryKey holds it; storage is best effort
 }
 
 function authHeaders(extra) {
@@ -1011,7 +1017,12 @@ async function claimWithCode(code) {
                     keyStoreError + '）。请在浏览器设置里允许本站保存数据后重试。');
   }
   hidePairing();
-  window.location.reload();          // reopen every stream with the key in place
+  // No reload: the key now lives in memory, so the page can come up
+  // without a navigation that might drop it (see memoryKey above).
+  loadFont().catch(function () {}).then(function () {
+    applyRoute();
+    connect();
+  });
 }
 
 function wirePairing() {
