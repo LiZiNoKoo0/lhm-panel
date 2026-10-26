@@ -58,6 +58,7 @@ from pathlib import Path
 from pcmon import layouts
 from pcmon import lhm
 from pcmon import protocol
+from pcmon import sources
 from pcmon.devices import DeviceTable
 
 # ---------------------------------------------------------------------------
@@ -93,10 +94,13 @@ TOKEN_BYTES = 8
 TOKEN_FILE = "daemon.token"          # written next to this script for term_tk.py
 EXAMPLE_CLIENT_ID = "sample-thin"
 
-#: Value sources (M2 invented numbers / M5 real sensors).
-SOURCE_FAKE = "fake"
-SOURCE_LHM = "lhm"
-SOURCES = (SOURCE_FAKE, SOURCE_LHM)
+#: Value sources (M2 invented numbers / M5 real sensors / C6 a Linux server).
+#: The names themselves live in pcmon/sources.py: a fourth source should mean
+#: one new class, not a new branch in every if-statement below (TASKS.md B-2).
+SOURCE_FAKE = sources.SOURCE_FAKE
+SOURCE_LHM = sources.SOURCE_LHM
+SOURCE_PROC = sources.SOURCE_PROC
+SOURCES = sources.SOURCE_NAMES
 
 #: Authentication (PROTOCOL.md s.2, v0.6).
 #:
@@ -289,8 +293,20 @@ class FakeSource:
             "net.down": round(_clamp(net, 0.0, 8000.0), 0),
         }
 
+    def snapshot(self, now=None):
+        """The newest invented values, as a copy (C6: one contract).
+
+        `now` is accepted and ignored: tick() is what moves the numbers and the
+        daemon already drives it on the same 200 ms beat. Reading must not
+        advance the generators, or two readers would see different numbers.
+        """
+        return dict(self._values)
+
     def values(self):
-        """Newest snapshot; the caller must not mutate the returned dict."""
+        """Newest snapshot; the caller must not mutate the returned dict.
+
+        Kept for M5-era callers; new code asks for snapshot(now).
+        """
         return dict(self._values)
 
     def start(self):
@@ -309,6 +325,22 @@ def _clamp(value, low, high):
     if value > high:
         return high
     return value
+
+
+#: C6: the two sources this file owns join the one registry, so that
+#: sources.create("fake") and --source fake are the same thing. A factory takes
+#: the union of every source's keywords and drops what it does not need -- that
+#: is what keeps the dispatcher a single call instead of a branch per source.
+def _fake_factory(seed=None, **_ignored):
+    return FakeSource(seed)
+
+
+def _lhm_factory(bridge_path=None, log=None, **_ignored):
+    return lhm.LhmSource(bridge_path or DEFAULT_BRIDGE_PATH, log=log)
+
+
+sources.register(SOURCE_FAKE, _fake_factory)
+sources.register(SOURCE_LHM, _lhm_factory)
 
 
 # ---------------------------------------------------------------------------
@@ -612,11 +644,18 @@ class Daemon:
         self.stats = collections.Counter()
 
     def _make_source(self, source, bridge_path, seed):
-        """Pick the value source. Only the source changes, never the protocol."""
-        if source == SOURCE_LHM:
-            # The bridge reports spawn/exit/restart trouble through our log.
-            return lhm.LhmSource(bridge_path, log=self.log)
-        return FakeSource(seed)
+        """Pick the value source. Only the source changes, never the protocol.
+
+        One call into the registry (C6): a fourth source is a class plus a
+        register(), not a branch here. The seeds/paths are offered to everyone
+        and each factory keeps only what it uses.
+        """
+        try:
+            return sources.create(source, seed=seed, bridge_path=bridge_path,
+                                  log=self.log)
+        except ValueError as exc:      # only if a name got past the CLI choices
+            self.log("source %r is not usable (%s); using fake" % (source, exc))
+            return sources.create(SOURCE_FAKE, seed=seed)
 
     def _start_source(self):
         """Start the value source (M5: spawns the bridge in the background)."""
@@ -787,10 +826,11 @@ class Daemon:
     def current_catalog(self):
         """(ver, metrics) to publish right now.
 
-        fake mode keeps the fixed METRICS table; lhm mode publishes only the
-        sensors that resolved, with a ver that moves when that set changes.
+        fake mode keeps the fixed METRICS table; a source that can name its
+        metrics (lhm, proc) publishes only the sensors that resolved, with a ver
+        that moves when that set changes.
         """
-        if self.source_kind == SOURCE_LHM:
+        if sources.has_metrics(self._source):
             self.refresh_catalog()
             with self._catalog_lock:
                 return self._catalog_ver, list(self._catalog_metrics)
@@ -798,7 +838,7 @@ class Daemon:
 
     def _sync_catalog(self):
         """Push a fresh catalog to everyone when the metric set changed (s.6)."""
-        if self.source_kind != SOURCE_LHM:
+        if not sources.has_metrics(self._source):
             return
         try:
             if not self.refresh_catalog():
@@ -819,9 +859,7 @@ class Daemon:
         lhm mode asks the source for a snapshot, which is a dict lookup: the
         bridge pipe is read by its own thread and never blocks this one.
         """
-        if self.source_kind == SOURCE_LHM:
-            return self._source.snapshot(time.monotonic())
-        return self._source.values()
+        return sources.snapshot_of(self._source, time.monotonic())
 
     def send_catalog(self, client):
         ver, metrics = self.current_catalog()
@@ -1515,7 +1553,7 @@ class Daemon:
                 except OSError:
                     pass
                 self._rec = None
-        if self.source_kind == SOURCE_LHM:
+        if self.source_kind != SOURCE_FAKE:
             source_stats = getattr(self._source, "stats", None)
             if source_stats:
                 self.log("source stats: "
@@ -1524,9 +1562,10 @@ class Daemon:
         self.log("stats: " + ", ".join("%s=%d" % (k, v) for k, v in sorted(self.stats.items())))
 
     def banner(self):
-        live = self.source_kind == SOURCE_LHM
+        live = self.source_kind != SOURCE_FAKE
         lines = [
-            ("PC-Monitor daemon (PROTOCOL.md v0.4, live LibreHardwareMonitor data)"
+            ("PC-Monitor daemon (PROTOCOL.md v0.4, live %s data)"
+             % self.source_kind
              if live else
              "PC-Monitor fake daemon (PROTOCOL.md v0.4, fake data only)"),
             "  listen   : %s:%d (TCP, NDJSON)" % (self.host, self.port),
@@ -1535,11 +1574,14 @@ class Daemon:
                                    if self.auth_mode != "static" else "")),
             "  token    : " + (self.token if self.auth_mode != "hmac" else "(not used)"),
         ]
-        if live:
+        if self.source_kind == SOURCE_LHM:
             bridge = getattr(self._source, "bridge_path", "")
             present = os.path.isfile(bridge) if bridge else False
             lines.append("  source   : lhm bridge " + str(bridge)
                          + (" (found)" if present else " (MISSING, see --bridge)"))
+            lines.append("  metrics  : resolved sensors only, published via catalog")
+        elif live:
+            lines.append("  source   : proc (/proc + /sys, Linux)")
             lines.append("  metrics  : resolved sensors only, published via catalog")
         else:
             lines.append("  metrics  : " + ", ".join(m["id"] for m in METRICS))
@@ -1601,8 +1643,9 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=None,
                        help="seed the fake value generator for repeatable numbers")
     parser.add_argument("--source", choices=SOURCES, default=SOURCE_FAKE,
-                       help="value source: fake (invented numbers, default) or lhm "
-                            "(real LibreHardwareMonitor sensors via lhm_bridge.exe)")
+                       help="value source: fake (invented numbers, default), lhm "
+                            "(LibreHardwareMonitor via lhm_bridge.exe, Windows) or "
+                            "proc (/proc + /sys, Linux)")
     parser.add_argument("--bridge", metavar="PATH", default=DEFAULT_BRIDGE_PATH,
                        help="lhm bridge executable (default %s); ignored by --source fake"
                             % DEFAULT_BRIDGE_PATH)
@@ -1636,6 +1679,13 @@ def write_token_file(token_text):
 
 def main(argv=None):
     args = parse_args(argv)
+
+    # A source that cannot work here is a startup error, not a daemon that runs
+    # and publishes nothing (C6). Said once, loudly, instead of an empty catalog
+    # that looks like a broken board.
+    reason = sources.platform_reason(args.source)
+    if reason:
+        raise SystemExit("fake_daemon: --source %s: %s" % (args.source, reason))
     daemon = Daemon(host=args.host, port=args.port, token=args.token,
                     record_path=args.record, lenient=args.lenient, seed=args.seed,
                     source=args.source, bridge_path=args.bridge,

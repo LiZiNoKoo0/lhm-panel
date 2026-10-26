@@ -27,7 +27,7 @@
 | C2 | PC 侧实现：`pcmon/protocol.py` 的 mac/srv/challenge/auth、`fake_daemon.py` 握手门 + `--auth hmac\|static\|any` + 失败锁定、`term_tk`/`webui`/`launcher` 应答挑战、`pcmon/devices.py` 设备表 + `pcmon/pair.py`、`tools/check_auth.py` | ✅ 完成（2026-10-25） | `tools/check_auth.py` → **AUTH OK (12 checks)**（含重放拒绝、错 mac、跨 client_id 不通用、认证前零泄漏、5 s 超时、第 6 次 locked、static 模式两态）；`python -m pcmon.protocol` → **ALL OK 12/12**（含两条钉死的 mac/srv 向量）；`term_tk.py --selftest` → **22/22 PASS**（现在走的是真握手，不再是 --lenient 旁路） |
 | C3 | 固件：`sha256.rs` + `auth.rs`、`wire` hello 去 token、`session` 的 `Challenged` 态、`net_link` 验 srv + 回 mac、三条串口行；串口 `KW` 配对（固件写盘已验，工具回执未验） | 🟡 1–3 上板验过；4 固件侧验过、工具侧未验（2026-10-26 13:01） | `cargo test` 207 绿、零 warning；板上 `AUTH ok` 用的是**真实 128 位 key** `5f2c1b7a…`；`STORE ok slot=A seq=8`（曾 B/5）证明 `KW` 写盘成功 |
 | C5 | 手机：webui 放开 + HTTPS 自签 + 6 位配对码 + cookie 会话 | ⬜ 未开工 | |
-| C6 | 指标源可插拔（服务器 / Linux 没有 LHM） | ⬜ 未开工 | |
+| C6 | 指标源可插拔：`pcmon/sources.py` 一份契约 + 注册表，新增 `proc`（Linux /proc + /sys）；`fake_daemon` 里四处 `source_kind == SOURCE_LHM` 全部改成问接口 | ✅ 完成（2026-10-27） | `tools/check_sources.py` → Windows **SOURCES OK (36 checks)**、Linux **SOURCES OK (22 checks)**；banner 跟着源变；`python -m pcmon.protocol` 仍 **ALL OK 12/12** |
 
 
 #### C3 现场状态（2026-10-26 01:20，睡觉前留档）
@@ -664,3 +664,60 @@ python -m pcmon.webui --host 0.0.0.0 --debug-http --tls-cert tls\server.crt --tl
 但**单行模式会被算两次**——它的 LF 与 CRLF 两个“变体”是同一个字符串，`count` 各自 +1，
 于是命中数 2、脚本自爆。这次第一趟就栽在最后一条替换上，前五条已经落盘；第二趟先检查
 “已落盘标记”，只补剩下的。以后写这类脚本：**变体去重**，并且**先自检再动手**。
+
+#### C6：指标源可插拔（2026-10-27）
+
+原本排在最后，理由是"PC 上有 LHM"。现在成了硬需求：她日常这台是 **Linux**（手机 chroot），
+`lhm_bridge.exe` 那条路在这儿根本不存在。
+
+**改之前的形状（问题）**：`FakeSource` 有 `tick()` / `values()`，`LhmSource` 有
+`snapshot(now)` / `metrics()`，`fake_daemon` 用 `source_kind` 记着自己手里是哪一个，
+四处 `if ... == SOURCE_LHM`。加第三个源 = 把那四个判断再抄一遍（B-2 的老毛病）。
+
+**现在的形状**
+
+| 件 | 内容 |
+|---|---|
+| `pcmon/sources.py`（新） | 一份契约 + `REGISTRY` + `create()` + `snapshot_of()` / `has_metrics()` + `platform_reason()` |
+| `ProcSource`（新） | `/proc/stat`（CPU 占用）、`/proc/meminfo`（内存）、`/proc/net/dev`（下行速率）、`/sys/class/{hwmon,thermal}`（温度） |
+| `fake_daemon.py` | `--source fake\|lhm\|proc`；`_make_source()` 变成一次 `sources.create(...)`；banner 按源说话 |
+| `tools/check_sources.py`（新） | 对每个源跑**同一套**契约检查 |
+
+契约只有五个名字：`start() stop() tick(now) snapshot(now) metrics()`。
+`metrics()` **可选**——fake 的固定表由 daemon 拥有，`has_metrics()` 是"问"它，而不是猜。
+
+**三条判断（值得记）**
+
+1. **"未知"不是 0**。`cpu.total` / `net.down` 是差值量，进程刚起来没有前值 ⇒ 返回 `None`，
+   屏上 `--`。给个 `0.0` 会让人以为机器闲着——那是最贵的一种谎。
+2. **一个意思只能有一个名字**。旧的两套 API（`values()` 与 `snapshot(now)`）正是
+   `source_kind` 这层"记忆"的成因。`FakeSource` 现在也答 `snapshot(now)`，`values()` 只留给 M5 时代的调用者。
+3. **跑不了的源要当场吼**。`--source proc` 在 Windows 上不是"启动后没有指标"，而是启动就
+   `SystemExit`：`proc reads /proc and /sys, which only exist on Linux (this is nt)`。
+
+**验收（可复现）**
+
+```
+# Windows：fake + lhm 走契约；proc 按平台 SKIP
+python tools\check_sources.py                       -> SOURCES OK (36 checks, 0 failed)
+
+# Linux：proc 的原生环境
+python3 tools/check_sources.py --source proc         -> SOURCES OK (22 checks, 0 failed)
+
+# banner 跟着源说话（构造 daemon 不发 socket）
+--- --source fake ---   PC-Monitor fake daemon ... metrics: cpu.total, cpu.temp, mem.used, net.down
+--- --source lhm  ---   PC-Monitor daemon (live lhm data) / source: lhm bridge H:\tools\lhm\lhm_bridge.exe (found)
+
+# 没有回归
+python -m pcmon.protocol                             -> ALL OK (12/12)
+```
+
+Linux 实测（这台手机）：`cpu.total` 从 24.4% 变 4.4%、`mem.used` 91.4%、
+`net.down` 0.0 KB/s、`cpu.temp` 从 thermal zone 读到。
+
+**还没做（写在这儿防忘）**：`catalog.source = local | remote`（PROTOCOL §6.1）仍未接线，
+现在所有源都算 `remote`；等 L 系列终端能自己测指标时才真有东西可标。
+
+**一条自嘲但真的教训**：这轮我自己的补丁脚本连炸三次——单行模式被算两次、
+"`SOURCE_LHM` 一处都不许剩"的断言（banner 那行本来就该留）、`def values()` 出现次数的假设错。
+三次都是"断言比事实更严"。补丁脚本的自检要检**必须成立的事**，不是**我以为的事**。
