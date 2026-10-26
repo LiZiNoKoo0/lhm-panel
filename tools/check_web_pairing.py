@@ -12,6 +12,7 @@ Skipped politely when that is not true.
 """
 
 import argparse
+import http.client as http_client
 import json
 import os
 import re
@@ -65,6 +66,23 @@ def http(method, path, body=None, token=None, timeout=5.0):
         return exc.code, exc.read()
     except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
         return 0, str(exc).encode()
+
+
+def stream_status(path):
+    """Status of a streaming endpoint: headers only, body left alone."""
+    if USE_TLS:
+        conn = http_client.HTTPSConnection("127.0.0.1", PORT, timeout=4,
+                                           context=_context())
+    else:
+        conn = http_client.HTTPConnection("127.0.0.1", PORT, timeout=4)
+    try:
+        conn.request("GET", path)
+        resp = conn.getresponse()      # returns as soon as headers land
+        return resp.status
+    except (OSError, http_client.HTTPException):
+        return 0
+    finally:
+        conn.close()
 
 
 def webui_key():
@@ -188,6 +206,13 @@ def main(argv=None):
 
         status, _ = http("GET", "/api/state", token="0" * 32)
         check("a wrong key is still 401", status == 401, "status=%s" % status)
+
+        # /events is the one route that takes the key in the URL: EventSource
+        # cannot set headers. Both directions are worth pinning.
+        check("GET /events?key=<derived> opens the stream",
+              stream_status("/events?key=" + derived) == 200)
+        check("GET /events?key=<wrong> is 401",
+              stream_status("/events?key=" + "0" * 32) == 401)
 
         # --- revocation is deleting the row
         if os.path.exists(sessions):

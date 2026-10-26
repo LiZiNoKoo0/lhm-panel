@@ -318,5 +318,26 @@ python -m pcmon.webui --port 7803 --open</pre>
 </div>
 <script src="/app.js"></script>
 <script src="/editor.js"></script>
+
+<!-- Pairing (PROTOCOL.md s.2.2). Hidden until a request comes back 401; the code
+     only exists on the machine running the dashboard. -->
+<div id="pairing" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+  <div class="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl">
+    <h2 class="text-base font-semibold text-gray-900">配对这台设备</h2>
+    <p class="mt-1 text-sm text-gray-500">
+      在运行仪表盘的电脑上查看控制台，输入那里显示的 6 位配对码。
+    </p>
+    <input id="pair-code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+           autocomplete="off" spellcheck="false"
+           class="mt-4 w-full rounded-lg border border-gray-300 px-3 py-2 text-center text-2xl tracking-[0.4em] tabular focus:border-gray-900 focus:outline-none"
+           aria-label="6 位配对码">
+    <button id="pair-go" type="button"
+            class="mt-3 w-full rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800">
+      配对
+    </button>
+    <p id="pair-msg" class="mt-3 text-xs text-gray-500" role="status"></p>
+  </div>
+</div>
+
 </body>
 </html>

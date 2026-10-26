@@ -550,3 +550,26 @@ Authorization 头，而能访问 loopback 的进程本来就在这台机器上�
 已验证：严格模式 12 项全过；loopback 默认 /api/state 无 token 仍 200。
 
 **还没做（C5 剩余）**：前端配对表单 + WebCrypto HKDF + Bearer 头；自签证书生成脚本；手机真机验证。
+
+#### C5 第三步：前端配对界面（2026-10-26）
+
+| 改动 | 内容 |
+|---|---|
+| `webstatic/index.html` | 配对浮层：默认隐藏，收到 401 才出现；只要求 6 位数字 |
+| `webstatic/app.js` | 配对流程（`/pair/begin` → 用户输入码 → WebCrypto HKDF → `/pair/claim`）、key 存 localStorage、`fetch` 带 `Authorization`、`EventSource` 带 `?key=` |
+| `pcmon/webui.py` | `/events` **唯一**接受查询参数 key 的路由（EventSource 不能设 Header） |
+| `tools/check_web_pairing.py` | 增加到 14 项：`/events?key=<正确>` 200、`<错误>` 401 |
+
+```
+python tools/check_web_pairing.py             -> WEB PAIRING OK (14 checks)
+python tools/check_web_pairing.py --tls ...   -> WEB PAIRING OK (14 checks)
+```
+
+**踩到并修掉的一个真 bug**：给 `/events` 加查询参数回退时，我按位置插入代码，把原来的
+`return None` 挤进了 `if parsed.path == "/events"` 里面 —— 于是**没有 Header 的请求一律 401**，
+查询参数根本没被用上。症状很迷惑：`/api/state` 带 Header 正常，`/events?key=` 却 401。
+用最小复现打印真实状态码才定位到（不是猜）。
+
+**前端还没验的部分**：JS 只在"静态资源已更新、服务端行为已测"这个层面验证过，
+真正的浏览器/手机端没跑过。WebCrypto 的 HKDF 与 Python 的 `derive_key` 是否逐字节一致，
+必须靠一次真机配对来证明——那是下一步。

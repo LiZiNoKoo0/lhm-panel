@@ -46,7 +46,7 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 try:  # imported as a package (python -m pcmon.webui)
     from . import font8x16
@@ -368,6 +368,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.sessions is None:
             return None
         token = self._bearer()
+        if not token:
+            # EventSource cannot set headers, so the snapshot stream is the one
+            # route that accepts the key in the query string. Everything else
+            # must carry a header: a key in a URL ends up in logs and referrers.
+            parsed = urlparse(self.path)
+            if parsed.path == "/events":
+                token = (parse_qs(parsed.query).get("key") or [""])[0].strip()
         if not token:
             return None
         for client_id, entry in self.sessions.entries().items():

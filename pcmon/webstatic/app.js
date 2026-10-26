@@ -780,7 +780,12 @@ function render(state) {
 }
 
 async function loadFont() {
-  const data = await (await fetch('/api/font')).json();
+  const resp = await fetch('/api/font', { headers: authHeaders() });
+  if (resp.status === 401) {
+    showPairing('这台设备还没有配对。请从运行仪表盘的电脑上读取 6 位配对码。');
+    throw new Error('unpaired');
+  }
+  const data = await resp.json();
   atlas = {
     w: data.w, h: data.h, first: data.first,
     glyphs: data.glyphs.map((rows) => Uint8Array.from(rows)),
@@ -788,7 +793,10 @@ async function loadFont() {
 }
 
 function connect() {
-  const source = new EventSource('/events');
+  // EventSource cannot send headers; the server accepts the key on this one
+  // route only (see _who in webui.py).
+  const key = pairedKey();
+  const source = new EventSource('/events' + (key ? '?key=' + encodeURIComponent(key) : ''));
   source.onmessage = (event) => {
     try {
       render(JSON.parse(event.data));
@@ -844,3 +852,114 @@ boot().catch((err) => {
   badge.textContent = '启动失败';
   el('warn').textContent = String(err);
 });
+
+// ---- pairing (PROTOCOL.md s.2.2) -----------------------------------------
+// A browser cannot hold a pre-shared key, so it earns one: the operator reads a
+// 6-digit code off the machine running the dashboard, types it here, and both
+// sides derive the same key with HKDF. The key never travels over the wire.
+
+const KEY_STORE = 'pcmon.key';
+
+function pairedKey() {
+  try {
+    return localStorage.getItem(KEY_STORE) || '';
+  } catch (err) {
+    return '';           // private mode: pairing will not survive a reload
+  }
+}
+
+function storeKey(value) {
+  try {
+    if (value) localStorage.setItem(KEY_STORE, value);
+    else localStorage.removeItem(KEY_STORE);
+  } catch (err) { /* ignore: the page still works until it reloads */ }
+}
+
+function authHeaders(extra) {
+  const key = pairedKey();
+  const headers = extra || {};
+  if (key) headers.Authorization = 'Bearer ' + key;
+  return headers;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** K = HKDF-SHA256(code, "client_id|client_nonce|daemon_nonce", "pcmon-pair-v1", 16) */
+async function deriveKeyHex(code, clientId, clientNonce, daemonNonce) {
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(code), 'HKDF',
+                                            false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({
+    name: 'HKDF',
+    hash: 'SHA-256',
+    salt: enc.encode(clientId + '|' + clientNonce + '|' + daemonNonce),
+    info: enc.encode('pcmon-pair-v1'),
+  }, base, 128);
+  return bytesToHex(new Uint8Array(bits));
+}
+
+function showPairing(message) {
+  const overlay = el('pairing');
+  if (!overlay) return;
+  overlay.classList.remove('hidden');
+  const note = el('pair-msg');
+  if (note && message) note.textContent = message;
+}
+
+function hidePairing() {
+  const overlay = el('pairing');
+  if (overlay) overlay.classList.add('hidden');
+}
+
+async function pairWithCode(code) {
+  const beginResp = await fetch('/pair/begin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'browser' }),
+  });
+  if (!beginResp.ok) throw new Error('服务器拒绝了配对请求 (' + beginResp.status + ')');
+  const begin = await beginResp.json();
+
+  const clientNonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  const keyPromise = deriveKeyHex(code, begin.client_id, clientNonce, begin.daemon_nonce);
+  const claimResp = await fetch('/pair/claim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pair_id: begin.pair_id, code: code, client_nonce: clientNonce }),
+  });
+  if (!claimResp.ok) throw new Error('配对码不对，或者已经过期');
+  const key = await keyPromise;      // the same bytes the server just derived
+  storeKey(key);
+  hidePairing();
+  return key;
+}
+
+function wirePairing() {
+  const button = el('pair-go');
+  const input = el('pair-code');
+  if (!button || !input) return;
+  const submit = async () => {
+    const code = (input.value || '').trim();
+    if (!/^\d{6}$/.test(code)) {
+      el('pair-msg').textContent = '请输入 6 位数字';
+      return;
+    }
+    button.disabled = true;
+    el('pair-msg').textContent = '配对中…';
+    try {
+      await pairWithCode(code);
+      window.location.reload();      // reopen every stream with the key in place
+    } catch (err) {
+      el('pair-msg').textContent = err.message || String(err);
+      button.disabled = false;
+    }
+  };
+  button.addEventListener('click', submit);
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+  });
+}
+
+window.addEventListener('DOMContentLoaded', wirePairing);
