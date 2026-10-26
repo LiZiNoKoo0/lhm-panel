@@ -625,3 +625,42 @@ PAIR ok (board stored the key, table updated)
 **手边留个教训**：查"板子有没有连回来"时，我用 `Select-String -Last` 抓 `192.168.`，
 第一次匹配到的是几小时前的旧行，看起来像"已经连上了"——差点读成成功。
 时间戳属于输出、不属于结论：筛日志要先按本次事件的起始时间过滤，再取最后一行。
+
+#### C5 收尾：临时诊断收进 `--debug-http`（2026-10-27）
+
+`ba7a628` 里留了四处 **TEMPORARY** 探针，注释原话是“unattended 之前必须删掉或加闸”：
+
+| 探针 | 原来的位置 |
+|---|---|
+| 每个 JSON 响应打一行 `REQ` | `webui.py::_json` |
+| 每个静态文件打一行 `STATIC` | `webui.py::_static` |
+| 401 时打 token 指纹（`len` + `sha8`，不打印 token） | `webui.py::_need_auth` |
+| `POST /debug/client-error` 免鉴权接收浏览器错误 | `webui.py::do_POST` |
+| 页面侧把 window.onerror / unhandledrejection 上报上去 | `webstatic/index.html` |
+
+**改法**：新增 `--debug-http`（**默认关**），四处服务端输出全部包进 `if DEBUG_HTTP:`；
+页面侧的上报改成**打开 `/?debug=1` 才武装**（`URLSearchParams` 守卫），
+`app.js` 早就有 `if (window.pcmonReport)` 守卫，所以默认关掉不会报错，也不会发出请求。
+
+**怎么用**（手机白屏、连不上时才需要）：
+
+```
+python -m pcmon.webui --host 0.0.0.0 --debug-http --tls-cert tls\server.crt --tls-key tls\server.key
+手机打开 https://<本机IP>:7803/?debug=1
+```
+
+两边都开才有日志——这是故意的：`/debug/client-error` 是一条**免鉴权写路径**，
+不能默认开在局域网上。
+
+**验收证据**（不是“看过一眼”）：
+
+- `python tools\check_pairing.py` → exit 0
+- `python tools\check_web_pairing.py` → **WEB PAIRING OK (14 checks)**，
+  且整份输出里 `REQ` / `STATIC` / `AUTH 401` 行数**都是 0** ⇒ 默认关是被证明的
+- `python -m pcmon.protocol` → **ALL OK**
+- `python -m py_compile pcmon\webui.py` → 通过
+
+**一条可推广的教训（补丁脚本）**：一次性补丁脚本用“整段替换 + 命中次数必须为 1”是对的做法，
+但**单行模式会被算两次**——它的 LF 与 CRLF 两个“变体”是同一个字符串，`count` 各自 +1，
+于是命中数 2、脚本自爆。这次第一趟就栽在最后一条替换上，前五条已经落盘；第二趟先检查
+“已落盘标记”，只补剩下的。以后写这类脚本：**变体去重**，并且**先自检再动手**。

@@ -6,9 +6,12 @@
 <title>PC-Monitor · 上位机仪表盘</title>
 <link rel="stylesheet" href="/tokens.css">
 <script>
-// TEMPORARY: report startup failures to the server. A white page with no API
-// request is invisible from the server side; this turns it into a log line.
+// Report startup failures to the server -- opt-in via /?debug=1. A white page
+// with no API request is invisible from the server side and a phone has no
+// devtools, so the page posts its own reason; the server only listens under
+// --debug-http, and an unpaired browser must not be able to write log lines.
 (function () {
+  if (new URLSearchParams(location.search).get('debug') !== '1') { return; }
   function report(payload) {
     try {
       fetch('/debug/client-error', {
