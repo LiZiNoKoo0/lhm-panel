@@ -37,7 +37,10 @@ WHAT THIS FILE DELIBERATELY DOES NOT DO
 
 import argparse
 import collections
+import hmac
 import json
+import secrets
+import ssl
 import os
 import socket
 import threading
@@ -48,11 +51,15 @@ from urllib.parse import urlparse
 try:  # imported as a package (python -m pcmon.webui)
     from . import font8x16
     from . import layouts as layouts_mod
+    from . import pairing
     from . import protocol
+    from .devices import DeviceTable
 except ImportError:  # pragma: no cover - run as a loose script
     import font8x16
     import layouts as layouts_mod
+    import pairing
     import protocol
+    from devices import DeviceTable
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webstatic")
 
@@ -342,7 +349,98 @@ def _read_token(explicit, daemon_host):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "pcmon-webui"
-    link = None  # set by serve()
+    link = None       # set by serve()
+    codes = None      # pairing.PairingCodes, set by serve()
+    sessions = None   # DeviceTable of paired browsers, set by serve()
+    #: False only on loopback, where the caller is already the operator.
+    require_auth = True
+
+    # -- auth (PROTOCOL.md s.2.2 P-5) -------------------------------------
+
+    def _bearer(self):
+        raw = self.headers.get("Authorization") or ""
+        if not raw.lower().startswith("bearer "):
+            return ""
+        return raw[7:].strip()
+
+    def _who(self):
+        """Which paired browser is this? `None` means "not authorised"."""
+        if self.sessions is None:
+            return None
+        token = self._bearer()
+        if not token:
+            return None
+        for client_id, entry in self.sessions.entries().items():
+            key = entry.get("key") if isinstance(entry, dict) else None
+            if isinstance(key, str) and hmac.compare_digest(key, token):
+                return client_id
+        return None
+
+    def _need_auth(self):
+        """Gate one request. Returns the client_id, or None after answering 401."""
+        if not self.require_auth:
+            return "local"
+        who = self._who()
+        if who is None:
+            self._json({"error": "pair this browser first: POST /pair/claim",
+                        "pair": "/pair/begin"}, 401)
+            return None
+        self.sessions.mark_seen(who)
+        return who
+
+    def _read_json(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _pair_begin(self):
+        """Mint a code and put it in front of the *operator*, not the browser.
+
+        P-6 in the spec: the code must never appear in a response the device
+        being paired can read, or it is not a proof of anything. The console of
+        the machine running the dashboard is the pairing channel here -- on a
+        server that console is the SSH session, which is exactly the intent.
+        """
+        body = self._read_json()
+        name = str(body.get("name") or "browser")[:32]
+        client_id = "browser-%s" % secrets.token_hex(4)
+        source = self.client_address[0] if self.client_address else "?"
+        pair_id, code, daemon_nonce, ttl = self.codes.begin(client_id, source=source)
+        print("PAIR code=%s client=%s (%s) from=%s expires=%gs"
+              % (code, client_id, name, source, ttl), flush=True)
+        self._json({
+            "pair_id": pair_id,
+            "client_id": client_id,
+            "daemon_nonce": daemon_nonce,
+            "expires_in_s": ttl,
+            # How the browser builds the same salt; a mismatch here is the one
+            # way a pairing can "succeed" and then fail every request.
+            "salt": "client_id|client_nonce|daemon_nonce",
+            "info": "pcmon-pair-v1",
+            "alg": "hkdf-sha256/128",
+        })
+
+    def _pair_claim(self):
+        body = self._read_json()
+        source = self.client_address[0] if self.client_address else "?"
+        got = self.codes.claim(body.get("pair_id"), body.get("code"),
+                               body.get("client_nonce"), source=source)
+        if got is None:
+            self._json({"ok": False, "error": "bad, expired or replayed code"}, 403)
+            return
+        client_id, key = got
+        self.sessions.add(client_id, key=key, note="browser paired from %s" % source)
+        # The key is NOT returned: the browser derived the same bytes locally.
+        self._json({"ok": True, "client_id": client_id})
 
     def log_message(self, fmt, *args):  # keep the console for our own lines
         pass
@@ -380,6 +478,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        # One gate in front of every read of live data. The page itself and the
+        # static assets stay open so an unpaired browser can show a pairing form.
+        if path.startswith("/api/") or path == "/events":
+            if self._need_auth() is None:
+                return
         if path in ("/", "/index.html"):
             self._static("index.html")
             return
@@ -411,6 +514,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/pair/begin":
+            self._pair_begin()
+            return
+        if path == "/pair/claim":
+            self._pair_claim()
+            return
+        if self._need_auth() is None:
+            return
         if path == "/api/layout/apply":
             self._apply_layout()
             return
@@ -531,15 +642,36 @@ class WebServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def serve(host, port, link, layout_path=None):
+def _is_loopback(host):
+    return host in ("127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1")
+
+
+def serve(host, port, link, layout_path=None, sessions_path=None, tls=None,
+          require_auth=None):
     Handler.link = link
+    #: Loopback needs no pairing (the caller is the operator); anything else
+    #: must pair. `require_auth=True` forces the gate on -- which is what the
+    #: acceptance test does, so the tested path is the strict one.
+    Handler.require_auth = (not _is_loopback(host)) if require_auth is None \
+        else bool(require_auth)
+    Handler.codes = pairing.PairingCodes()
+    #: Paired browsers, in the same table shape as the daemon's devices: one
+    #: writer, atomic saves, revocation is deleting a row.
+    Handler.sessions = DeviceTable(
+        sessions_path or os.path.join("layouts", "websessions.json"))
     #: The same object the daemon holds, when they share a file. The editor
     #: writes through `apply`, which bumps `ver` and saves atomically; the daemon
     #: sees the new ver the next time it reads, so no socket is needed between
     #: the two processes (PROTOCOL 22.5).
     Handler.layouts = layouts_mod.AppliedLayouts(
         layout_path or os.path.join("layouts", "applied.json"))
-    return WebServer((host, port), Handler)
+    httpd = WebServer((host, port), Handler)
+    if tls and tls.get("certfile"):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(tls["certfile"], tls.get("keyfile") or None)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    return httpd
 
 
 def main(argv=None):
@@ -547,7 +679,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="pcmon.webui",
                                      description="browser dashboard for the daemon")
     parser.add_argument("--host", default="127.0.0.1",
-                        help="HTTP bind address (default 127.0.0.1: localhost only)")
+                        help="HTTP bind address (default 127.0.0.1: localhost only). "
+                             "Anything else needs --tls-cert, because a bearer token "
+                             "in the clear is a bearer token anyone can replay")
+    parser.add_argument("--tls-cert", default=None,
+                        help="PEM certificate chain; enables HTTPS")
+    parser.add_argument("--tls-key", default=None, help="PEM private key")
+    parser.add_argument("--sessions", default=os.path.join("layouts", "websessions.json"),
+                        help="paired browsers (default layouts/websessions.json)")
+    parser.add_argument("--require-auth", action="store_true",
+                        help="demand a paired key even on loopback (loopback is "
+                             "trusted by default; anything else always demands it)")
     parser.add_argument("--port", type=int, default=7803)
     parser.add_argument("--daemon", default="127.0.0.1:7802",
                         help="daemon address host:port")
@@ -575,7 +717,9 @@ def main(argv=None):
                 client_id=args.client_id, token_file=token_path)
     link.start()
 
-    httpd = serve(args.host, args.port, link, args.layouts)
+    httpd = serve(args.host, args.port, link, args.layouts, sessions_path=args.sessions,
+                  require_auth=True if args.require_auth else None,
+                  tls={'certfile': args.tls_cert, 'keyfile': args.tls_key})
     url = "http://%s:%d/" % (args.host, args.port)
     print("webui: %s  (daemon %s:%s, %dx%d, client_id=%s)"
           % (url, host, port_text or "7802", w, h, args.client_id))

@@ -12,6 +12,9 @@ daemon.token
 # ---- v0.6 device table: holds every terminal's key. Never commit it ----
 devices.json
 devices.json.tmp
+# paired browsers: same class of secret as devices.json
+layouts/websessions.json
+websessions.json
 .daemon-token
 
 # ---- applied layouts: user work, but per-machine ----
