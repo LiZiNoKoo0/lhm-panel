@@ -183,3 +183,17 @@ Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |
 
 EXE 的窗口问题已经结案：**pywebview + WebView2，`--window-selftest` 是验收证据，重建前先跑 `tools/fix_pywebview.py`**。
 认证还是静态共享 token（不是挑战应答），且 exe 与板子的 token 必须一致——用 `--token ***。**别再杀 `msedge` 全部进程。**
+
+## 顶层状态必须声明在 boot() 调用点之上（2026-10-27，连踩三次）
+
+`pcmon/webstatic/app.js` 的 `boot()` 在文件中部就执行；任何被它链条用到、却声明在它下面的
+`const` / `let` 都处在**临时死区**。抛出的 `ReferenceError` 会被 `pairedKey()` 之类自带的
+`try/catch` 吞掉，所以症状不是异常，而是"请求没带 key / 页面没数据"，极难反推。
+
+这一条已连踩三次：`keyStoreError`（ba7a628）、`memoryKey`（806b87b）、`KEY_STORE`（8b6bd4f）。
+最后一次的表现最迷惑：同一个页面里，服务端看到 `token=***`（没带 key），而文件末尾的自检却报
+`hasKey:true`——因为自检运行时变量早已初始化。
+
+规矩：**所有顶层状态集中在 `boot()` 调用点之上**，新增一条也不许放下面。
+改完必须跑 `node --check pcmon\webstatic\app.js`，并确认 `const KEY_STORE` 与 `let pendingPair`
+的位置都在 `boot().catch` 之前。
