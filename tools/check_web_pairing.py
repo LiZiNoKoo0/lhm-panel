@@ -11,9 +11,11 @@ Needs a daemon on 7802 (it uses the `webui` entry in devices.json to connect).
 Skipped politely when that is not true.
 """
 
+import argparse
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import time
@@ -28,6 +30,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 7833
 BASE = "http://127.0.0.1:%d" % PORT
 results = []
+USE_TLS = False
+
+
+def _context():
+    """Self-signed certificate: we are checking behaviour, not the CA chain."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def check(name, ok, detail=""):
@@ -47,7 +58,8 @@ def http(method, path, body=None, token=None, timeout=5.0):
         headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=_context() if USE_TLS else None) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
@@ -64,7 +76,17 @@ def webui_key():
         return None
 
 
-def main():
+def main(argv=None):
+    global PORT, BASE, USE_TLS
+    parser = argparse.ArgumentParser(description="browser pairing acceptance")
+    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--tls", action="store_true",
+                        help="serve with tls/server.crt and test over HTTPS")
+    args = parser.parse_args(argv)
+    PORT = args.port
+    USE_TLS = args.tls
+    BASE = "%s://127.0.0.1:%d" % ("https" if USE_TLS else "http", PORT)
+
     key = webui_key()
     if not key:
         print("SKIP: devices.json has no `webui` entry (pair the dashboard first)")
@@ -81,6 +103,9 @@ def main():
            "--host", "127.0.0.1", "--port", str(PORT),
            "--daemon", "127.0.0.1:7802", "--token", key,
            "--sessions", sessions, "--require-auth"]
+    if USE_TLS:
+        cmd += ["--tls-cert", os.path.join(ROOT, "tls", "server.crt"),
+                "--tls-key", os.path.join(ROOT, "tls", "server.key")]
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1)
     code = None

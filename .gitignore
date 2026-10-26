@@ -48,3 +48,8 @@ run-*.bat.bak*
 dist/
 build/
 *.spec
+
+# ---- TLS: the private key must never be committed ----
+tls/
+*.key
+*.pem
