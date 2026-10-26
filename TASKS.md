@@ -601,3 +601,27 @@ node tools/check_web_hkdf.mjs
 
 **这仍然不是真浏览器**：跑的是 Node 的 `crypto.subtle`（同一套 API 与参数面），
 真机/真手机那次配对依然没做。差别是它从"完全没验"变成了"参数已验证、只剩环境没验"。
+
+#### C3 补记（2026-10-26 22:52）—— key 轮换：真板子再配一次
+
+前端那轮改动之后，串口链路要确认没被带坏，所以又真配了一次（不是模拟）：
+
+```
+python -m pcmon.pair --serial COM10 --client st7735-160x80 --timeout 15
+
+PAIR mint client=st7735-160x80 key=5fe7d82aac517025552dec50f1333d48
+serial: KOK slot=A seq=32 len=32
+serial: FRAME 160x80 crc=0xf817bec1 bytes=25600
+PAIR ok (board stored the key, table updated)
+```
+
+- **`seq` 24 → 32** 才是写进 flash 的证据（`KOK` 只证明板子说它写了）。这条判据到现在没失效过。
+- 板子随后自己重启（串口上能看完整 boot 日志到 `READY`），用新 key 连回 daemon：
+  `AUTH ok` + `hello from st7735-160x80 role=thin ... auth=challenge-response`，
+  `devices.json` 的 `last_seen` 推到 22:54:55。旧 key `719f2d21…` 作废。
+- 读串口时 `pan.ps1` 会抛一次"端口被关闭"——那是板子复位导致 CH343 重新枚举的副作用，
+  **不是失败**。别拿这个当判据，判据仍是 `KOK`/`seq`。
+
+**手边留个教训**：查"板子有没有连回来"时，我用 `Select-String -Last` 抓 `192.168.`，
+第一次匹配到的是几小时前的旧行，看起来像"已经连上了"——差点读成成功。
+时间戳属于输出、不属于结论：筛日志要先按本次事件的起始时间过滤，再取最后一行。
