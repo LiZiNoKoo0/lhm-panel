@@ -913,33 +913,62 @@ function hidePairing() {
   if (overlay) overlay.classList.add('hidden');
 }
 
-async function pairWithCode(code) {
-  const beginResp = await fetch('/pair/begin', {
+// One outstanding /pair/begin, kept so the code the user reads can be claimed.
+let pendingPair = null;
+
+async function requestCode() {
+  const resp = await fetch('/pair/begin', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: 'browser' }),
   });
-  if (!beginResp.ok) throw new Error('服务器拒绝了配对请求 (' + beginResp.status + ')');
-  const begin = await beginResp.json();
+  if (!resp.ok) throw new Error('服务器拒绝了配对请求 (' + resp.status + ')');
+  pendingPair = await resp.json();
+  el('pair-msg').textContent =
+    '配对码已生成，在运行仪表盘的电脑上读取（后台运行时见启动器重定向的日志 ' +
+    'tmp\\webui_live.out 里的 PAIR code= 一行），然后输入。';
+  el('pair-code').focus();
+  return pendingPair;
+}
 
+async function claimWithCode(code) {
+  if (!pendingPair) throw new Error('请先点"获取配对码"');
   const clientNonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
-  const keyPromise = deriveKeyHex(code, begin.client_id, clientNonce, begin.daemon_nonce);
+  const keyPromise = deriveKeyHex(code, pendingPair.client_id, clientNonce,
+                                  pendingPair.daemon_nonce);
   const claimResp = await fetch('/pair/claim', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pair_id: begin.pair_id, code: code, client_nonce: clientNonce }),
+    body: JSON.stringify({
+      pair_id: pendingPair.pair_id,
+      code: code,
+      client_nonce: clientNonce,
+    }),
   });
   if (!claimResp.ok) throw new Error('配对码不对，或者已经过期');
-  const key = await keyPromise;      // the same bytes the server just derived
-  storeKey(key);
+  storeKey(await keyPromise);        // the same bytes the server just derived
   hidePairing();
-  return key;
+  window.location.reload();          // reopen every stream with the key in place
 }
 
 function wirePairing() {
+  const get = el('pair-get');
   const button = el('pair-go');
   const input = el('pair-code');
-  if (!button || !input) return;
+  if (!get || !button || !input) return;
+
+  get.addEventListener('click', async () => {
+    get.disabled = true;
+    el('pair-msg').textContent = '正在申请配对码…';
+    try {
+      await requestCode();
+    } catch (err) {
+      el('pair-msg').textContent = err.message || String(err);
+    } finally {
+      get.disabled = false;
+    }
+  });
+
   const submit = async () => {
     const code = (input.value || '').trim();
     if (!/^\d{6}$/.test(code)) {
@@ -949,8 +978,7 @@ function wirePairing() {
     button.disabled = true;
     el('pair-msg').textContent = '配对中…';
     try {
-      await pairWithCode(code);
-      window.location.reload();      // reopen every stream with the key in place
+      await claimWithCode(code);
     } catch (err) {
       el('pair-msg').textContent = err.message || String(err);
       button.disabled = false;

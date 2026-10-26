@@ -573,3 +573,31 @@ python tools/check_web_pairing.py --tls ...   -> WEB PAIRING OK (14 checks)
 **前端还没验的部分**：JS 只在"静态资源已更新、服务端行为已测"这个层面验证过，
 真正的浏览器/手机端没跑过。WebCrypto 的 HKDF 与 Python 的 `derive_key` 是否逐字节一致，
 必须靠一次真机配对来证明——那是下一步。
+
+#### C5 第四步：浮层为什么"没有框"、配对码到底在哪（2026-10-26）
+
+第一次点"获取配对码"时，浮层只有裸文字没有框。两个前端 bug，都不是协议问题：
+
+| 改动 | 内容 |
+|---|---|
+| `webstatic/tokens.css` | `.hidden` 在第 66 行，`.pairing-overlay` 的 `display:flex` 在其后、同为单类选择器——同权重后来者赢，`hidden` 永远压不住它。补 `.pairing-overlay.hidden { display:none }` |
+| `webstatic/index.html`、`app.js` | 提示写"在控制台上读取配对码"，可仪表盘是 `cmd /c ... > tmp\webui_live.out 2>&1` 起的，**没有控制台窗口**。文案改成指向那行 `PAIR code=` 的实际落点 |
+
+**上一节遗留的必验项已验**（WebCrypto 与 Python 的 HKDF 是否逐字节一致）：
+
+```
+node tools/check_web_hkdf.mjs
+  ok   /pair/begin 200
+  ok   code is NOT in the response
+  ok   code reached the operator log  (H:\newwork\tmp\webui_live.out)
+  ok   /pair/claim 200 (server derived the same key)
+  ok   claimed key opens /api/font
+  ok   wrong key is refused
+  WEB HKDF OK - WebCrypto and Python derive the same key
+```
+
+脚本里的 `deriveKeyHex` 是从 `app.js` **原样搬过来**的，所以 salt 顺序、`info` 标签、
+128 位输出任何一处对不上就会红——要验的本来就是参数字符串，不是算法本身。
+
+**这仍然不是真浏览器**：跑的是 Node 的 `crypto.subtle`（同一套 API 与参数面），
+真机/真手机那次配对依然没做。差别是它从"完全没验"变成了"参数已验证、只剩环境没验"。

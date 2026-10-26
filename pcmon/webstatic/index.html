@@ -321,21 +321,20 @@ python -m pcmon.webui --port 7803 --open</pre>
 
 <!-- Pairing (PROTOCOL.md s.2.2). Hidden until a request comes back 401; the code
      only exists on the machine running the dashboard. -->
-<div id="pairing" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-  <div class="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl">
-    <h2 class="text-base font-semibold text-gray-900">配对这台设备</h2>
-    <p class="mt-1 text-sm text-gray-500">
-      在运行仪表盘的电脑上查看控制台，输入那里显示的 6 位配对码。
+<div id="pairing" class="pairing-overlay hidden">
+  <div class="pairing-card">
+    <h2 class="pairing-title">配对这台设备</h2>
+    <p class="pairing-hint">
+      点下面的按钮，然后在运行仪表盘的电脑上读取 6 位配对码。
+      后台运行时仪表盘没有可见窗口，那行 <code>PAIR code=...</code> 写在启动器重定向的日志里
+      （本机：<code>H:\newwork\tmp\webui_live.out</code>）。
     </p>
-    <input id="pair-code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
-           autocomplete="off" spellcheck="false"
-           class="mt-4 w-full rounded-lg border border-gray-300 px-3 py-2 text-center text-2xl tracking-[0.4em] tabular focus:border-gray-900 focus:outline-none"
-           aria-label="6 位配对码">
-    <button id="pair-go" type="button"
-            class="mt-3 w-full rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800">
-      配对
-    </button>
-    <p id="pair-msg" class="mt-3 text-xs text-gray-500" role="status"></p>
+    <button id="pair-get" type="button" class="pairing-button">获取配对码</button>
+    <input id="pair-code" class="pairing-code" type="text" inputmode="numeric"
+           pattern="[0-9]*" maxlength="6" autocomplete="off" spellcheck="false"
+           aria-label="6 位配对码" placeholder="______">
+    <button id="pair-go" type="button" class="pairing-button-primary">配对</button>
+    <p id="pair-msg" class="pairing-msg" role="status"></p>
   </div>
 </div>
 

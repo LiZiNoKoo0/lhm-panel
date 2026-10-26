@@ -417,3 +417,100 @@ body {
 .editor-swatch::-webkit-color-swatch-wrapper { padding: 2px; }
 .editor-swatch::-webkit-color-swatch { border: 0; border-radius: .25rem; }
 .editor-swatch::-moz-color-swatch { border: 0; border-radius: .25rem; }
+
+/* ---------------------------------------------------------------- pairing -- */
+/* PROTOCOL.md s.2.2. Own classes rather than Tailwind utilities: this file only
+   implements what the page uses, and an unimplemented class is invisible
+   rather than wrong-looking, which is the worse failure. */
+
+.pairing-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, .5);
+}
+
+/* `.hidden` is defined at the top of this file; `.pairing-overlay` sets
+   `display: flex` far below it, and equal specificity means the later rule wins
+   -- so `hidden` alone would never hide the overlay. Two classes settles it. */
+.pairing-overlay.hidden { display: none; }
+
+.pairing-card {
+  width: 100%;
+  max-width: 22rem;
+  background: #fff;
+  border-radius: .75rem;
+  padding: 1.5rem;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, .2);
+}
+
+.pairing-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--gray-900);
+}
+
+.pairing-hint {
+  margin: .25rem 0 0;
+  font-size: .8125rem;
+  color: var(--gray-500);
+}
+
+.pairing-code {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: .75rem;
+  padding: .5rem;
+  border: 1px solid var(--gray-200);
+  border-radius: .5rem;
+  text-align: center;
+  font-size: 1.5rem;
+  letter-spacing: .4em;
+  font-variant-numeric: tabular-nums;
+}
+
+.pairing-button {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: .5rem;
+  padding: .5rem 1rem;
+  border: 1px solid var(--gray-200);
+  border-radius: .5rem;
+  background: #fff;
+  font-size: .875rem;
+  font-weight: 500;
+  color: var(--gray-700);
+  cursor: pointer;
+}
+
+.pairing-button-primary {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: .5rem;
+  padding: .5rem 1rem;
+  border: 0;
+  border-radius: .5rem;
+  background: var(--gray-900);
+  font-size: .875rem;
+  font-weight: 500;
+  color: #fff;
+  cursor: pointer;
+}
+
+.pairing-button:disabled,
+.pairing-button-primary:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.pairing-msg {
+  margin: .75rem 0 0;
+  min-height: 1.1em;
+  font-size: .75rem;
+  color: var(--gray-500);
+}
