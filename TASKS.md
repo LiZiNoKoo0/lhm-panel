@@ -530,3 +530,23 @@ daemon 侧 `AUTH ok`（13:13:31）。**板子现在用的是一把 128 位随机
 那是"不碰板子快速看布局"的开发路径，等 C5（手机/网页）统一改成"配对拿 key"。
 现在 hmac 模式下该文件根本不会被生成，所以这条路会**明确地**报"没有 token"，
 而不是悄悄用一个旧值连上去。
+
+#### C5 第一步：网页侧的配对与鉴权（2026-10-26）
+
+浏览器不能预共享密钥，也不能在网络上证明“人就在 PC 前”，所以按 PROTOCOL §2.2 走 6 位配对码：
+**码只出现在操作员的控制台**，两边各自用 HKDF 派生同一把 key，key 不上线。
+
+| 新增/改动 | 内容 |
+|---|---|
+| pcmon/pairing.py（新） | 纯逻辑：6 位码、60 s、一次性、只存 sha256(code)、3 次错码锁 10 分钟、同时只允许一个待配对 |
+| pcmon/webui.py | POST /pair/begin（码打到控制台）、POST /pair/claim（派生并登记）、/api/* 与 /events 要 Authorization: Bearer <key>、--tls-cert/--tls-key、--sessions |
+| 	ools/check_pairing.py（新） | 12 项规则验收 → PAIRING OK |
+| 	ools/check_web_pairing.py（新） | 起真 webui 走完整流程 → WEB PAIRING OK (12 checks) |
+
+**鉴权范围（重要）**：**loopback 免鉴权，对外监听必须配对**。桌面仪表盘 pp.js 从不发
+Authorization 头，而能访问 loopback 的进程本来就在这台机器上；一起拦掉只会破坏现有仪表盘。
+--require-auth 可强制打开，验收脚本走的就是这条严格路径。
+
+已验证：严格模式 12 项全过；loopback 默认 /api/state 无 token 仍 200。
+
+**还没做（C5 剩余）**：前端配对表单 + WebCrypto HKDF + Bearer 头；自签证书生成脚本；手机真机验证。
