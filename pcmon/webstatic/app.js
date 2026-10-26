@@ -47,6 +47,7 @@ let keyStoreError = '';
 //: The paired key, kept in memory because navigation is where it was lost:
 //: private-mode browsers keep site data for one document only.
 let memoryKey = '';
+let pendingPair = null;
 let searchTerm = '';
 
 const el = (id) => document.getElementById(id);
@@ -977,7 +978,6 @@ function hidePairing() {
 }
 
 // One outstanding /pair/begin, kept so the code the user reads can be claimed.
-let pendingPair = null;
 
 async function requestCode() {
   const resp = await fetch('/pair/begin', {
