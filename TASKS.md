@@ -763,3 +763,22 @@ https。误导性极强：客户端照 banner 去连得到 `fetch failed`，看�
 **TLS 现状**：`tls/server.crt` 的 SAN 含 `localhost` / `127.0.0.1` / `192.168.1.128`，名字没问题；
 但 `tls/ca` 是空的、证书从未导入系统信任库，所以 `node --use-system-ca` 帮不上。套件里用
 `NODE_TLS_REJECT_UNAUTHORIZED=0` 跑并在报告里写明——这条验的是 HKDF 参数是否一致，不是信任链。
+
+
+#### C5 real-phone pairing: verified (2026-10-27)
+
+Phone `192.168.1.31` -> `https://192.168.1.128:7803`: `claim 200` -> `/api/font 200` -> numbers moving.
+
+Two real bugs fixed (see `806b87b`):
+
+1. After a successful claim, `location.reload()` lost the key -- private modes and some in-app
+   browsers keep site data for a single document only. The key now lives in memory and the page
+   boots in place after pairing; persistence is best effort.
+2. My first version declared `memoryKey` below the `boot()` call site -> TDZ, the whole page died
+   before its first request, which looked exactly like "no data". The page's own error sink
+   (the `--debug-http` channel) reported it with a stack. Commit `ba7a628` documents the same
+   trap for `keyStoreError`; when fixing a TDZ, sweep every `let` in that section.
+
+Operating note: the dashboard must use the `webui` key from `devices.json`. Any other token makes
+the daemon log `AUTH timeout` every 5 s, because the dashboard refuses a daemon whose `srv` it
+cannot verify. Acceptance: `AUTH ok` + `hello from webui` + `REQ /api/font -> 200` + moving numbers.
