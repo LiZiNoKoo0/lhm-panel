@@ -24,8 +24,6 @@ for %%a in (%*) do (
 )
 
 rem ---- locate Python 3.12 first, then fall back to PATH python ----
-rem ---- fixed board token: must match the token stored in the board flash ----
-set "TOKEN=0123456789abcdef"
 
 set "PY=C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe"
 if not exist "%PY%" set "PY=python"
@@ -83,8 +81,8 @@ if defined DRYRUN (
   exit /b 0
 )
 
-start "PC-Monitor Daemon (lhm)" cmd /k "%PY%" fake_daemon.py --source lhm --port %PORT% --token %TOKEN% >nul 2>nul
-rem give the daemon time to bind and write daemon.token before the terminal reads it
+start "PC-Monitor Daemon (lhm)" cmd /k "%PY%" fake_daemon.py --source lhm --port %PORT% --auth hmac --devices devices.json >nul 2>nul
+rem give the daemon time to bind before the terminal connects
 ping -n 3 127.0.0.1 >nul
 start "PC-Monitor Terminal (lhm)" cmd /k "%PY%" term_tk.py --port %PORT% >nul 2>nul
 

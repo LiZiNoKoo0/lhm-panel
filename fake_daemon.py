@@ -1642,9 +1642,13 @@ def main(argv=None):
                     layout_file=args.layouts, auth_mode=args.auth,
                     devices_file=args.devices)
     daemon.banner()
-    written = write_token_file(daemon.token)
-    if written is not None:
-        daemon.log("token file: " + str(written))
+    # Only the static path needs a token on disk, and only because term_tk.py
+    # looks for it there. In hmac mode writing it would leave a plain secret in
+    # the working directory for no reader at all.
+    if daemon.auth_mode != "hmac":
+        written = write_token_file(daemon.token)
+        if written is not None:
+            daemon.log("token file: " + str(written))
     started = False
     try:
         started = daemon.serve_forever()

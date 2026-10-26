@@ -513,3 +513,20 @@ daemon 侧 `AUTH ok`（13:13:31）。**板子现在用的是一把 128 位随机
 规矩：**任何会改设备表的诊断/修复工具，退出前必须把原值放回去**，
 除非它明确成功并说明了新值。`pair --serial` 已经改成"先写板子、成功了才记账"，
 探测脚本现在也加了"没找到就复原"。
+
+#### 收尾：公开密钥这条线闭合（2026-10-26 14:17，选项 B）
+
+按"只改生产路径"做的，开发期便利路径留到 C5：
+
+| 改动 | 文件 | 验证 |
+|---|---|---|
+| `--auth` 默认 `any` → `hmac` | `launcher.py` | 冒烟：`auth: hmac`、`AUTH ok`、页面 `link_up=True metrics=4` |
+| hmac 模式下**不再生成** `daemon.token` | `launcher.py` | 冒烟后 `daemon.token` 不存在 |
+| hmac 模式下 daemon 不写 token 文件 | `fake_daemon.py` | banner 显示 `token: (not used)` |
+| 删掉硬编码的公开 token | `run-lhm.bat` | 改为 `--auth hmac --devices devices.json` |
+| 删掉两个含公开值的 token 文件 | `daemon.token`、`dist/daemon.token` | 已删除 |
+
+**仍然保留、但不是漏洞的**：`term_tk.py` / `pcmon/webui.py` 还能读 `daemon.token`——
+那是"不碰板子快速看布局"的开发路径，等 C5（手机/网页）统一改成"配对拿 key"。
+现在 hmac 模式下该文件根本不会被生成，所以这条路会**明确地**报"没有 token"，
+而不是悄悄用一个旧值连上去。

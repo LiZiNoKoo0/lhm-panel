@@ -382,7 +382,19 @@ def main(argv=None):
     import fake_daemon
     from pcmon import webui
 
-    token = _ensure_token(root, explicit=_opt(argv, "--token", None))
+    # Decide the auth mode before minting anything: in hmac mode a token file is
+    # a secret nobody reads.
+        # hmac by default: the board speaks challenge-response since 2026-10-26 and
+    # carries a 128-bit key in flash, so nothing here needs the v0.5 plain-token
+    # path. --auth any exists only as an upgrade window for a board that has not
+    # been reflashed yet, and it should be temporary by definition.
+    auth_mode = _opt(argv, "--auth", "hmac")
+    if auth_mode not in ("hmac", "static", "any"):
+        raise SystemExit("launcher: --auth must be hmac|static|any")
+
+    token = ""
+    if auth_mode != "hmac":
+        token = _ensure_token(root, explicit=_opt(argv, "--token", None))
 
     # v0.6: the dashboard is a device like any other. It is on this machine, so
     # it pairs itself instead of asking the operator for a code -- but it still
@@ -395,13 +407,6 @@ def main(argv=None):
     if not dash_key:
         dash_key = device_table.add("webui", note="bundled dashboard")
         _log("paired the bundled dashboard (client_id webui) into %s" % devices_path)
-
-    # --auth any by default: the board in flash still speaks the v0.5 plain
-    # token (firmware card C3 teaches it the handshake). --auth hmac once the
-    # board has been reflashed; that is also when the static path goes away.
-    auth_mode = _opt(argv, "--auth", "any")
-    if auth_mode not in ("hmac", "static", "any"):
-        raise SystemExit("launcher: --auth must be hmac|static|any")
 
     def run_daemon():
         try:
