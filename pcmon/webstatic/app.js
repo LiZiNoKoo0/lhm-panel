@@ -41,6 +41,7 @@ let history = {};
 //: would still be in its temporal dead zone at that moment, and the page died
 //: with "Cannot access 'keyStoreError' before initialization" before issuing a
 //: single request.
+const KEY_STORE = 'pcmon.key';
 let keyStoreError = '';
 
 //: The paired key, kept in memory because navigation is where it was lost:
@@ -884,7 +885,6 @@ boot().catch((err) => {
 // 6-digit code off the machine running the dashboard, types it here, and both
 // sides derive the same key with HKDF. The key never travels over the wire.
 
-const KEY_STORE = 'pcmon.key';
 
 function pairedKey() {
   if (memoryKey) return memoryKey;
@@ -1012,7 +1012,13 @@ async function claimWithCode(code) {
   // The key has to be on this side before the reload. Reloading with nothing
   // stored just shows the overlay again, which reads as "pairing failed" when
   // in fact the claim succeeded -- so refuse to reload and say why.
-  if (!storeKey(await keyPromise)) {
+  const storedOk = storeKey(await keyPromise);
+  // If persistence failed, say so where the operator can read it: a browser
+  // that keeps no site data means pairing again after every reload.
+  if (window.pcmonReport && keyStoreError) {
+    window.pcmonReport({kind: 'store', msg: keyStoreError, stored: storedOk});
+  }
+  if (!storedOk) {
     throw new Error('配对已通过，但这个浏览器不让网页保存数据（' +
                     keyStoreError + '）。请在浏览器设置里允许本站保存数据后重试。');
   }
