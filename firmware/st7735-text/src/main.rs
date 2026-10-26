@@ -424,6 +424,12 @@ async fn ui_task(mut ui: Ui) -> ! {
     //: dispatch closure because writing flash is async and the closure is not.
     let mut pair_request: Option<Result<[u8; panel_core::auth::KEY_HEX_CHARS],
                                      panel_core::auth::KwError>> = None;
+    //: A key was written and the board is waiting for the host to say `KBOOT`.
+    //: It must NOT reset by itself: the reset re-enumerates the CH343 and takes
+    //: the `KOK` line with it, which is why the pairing tool never saw a reply.
+    let mut pair_armed = false;
+    let mut pair_deadline: u32 = 0;
+    let mut reboot_now = false;
     // Whether the badge is on the glass right now. Kept here rather than inside
     // the scene: the badge is not part of any layout, and a scene that had to
     // know about the link would be asking the wrong layer.
@@ -454,6 +460,12 @@ async fn ui_task(mut ui: Ui) -> ! {
             let mut sink = log::ChanLog::new();
             let now = sys::now_ms();
             inbox.poll(&mut sources, rx, |route, line| match route {
+                Route::Bench if line == b"KBOOT" => {
+                    // The host read `KOK`; nothing is left to say, so reboot.
+                    if pair_armed {
+                        reboot_now = true;
+                    }
+                }
                 Route::Bench => match panel_core::auth::kw_line(line) {
                     // v0.6 pairing (PROTOCOL.md s.2.3). Recognised *before* the
                     // bench renderer: a `KW` line is not content, and drawing
@@ -532,25 +544,25 @@ async fn ui_task(mut ui: Ui) -> ! {
                     let key = core::str::from_utf8(&buf).unwrap_or("");
                     match crate::net::pair_key(key).await {
                         Some((slot, seq, len)) => {
-                            // Twice, 300 ms apart: the reset below makes the
-                            // CH343 re-enumerate, and whatever is still in the
-                            // USB side of the pipe at that moment is gone. Two
-                            // copies cost 25 bytes and remove that race.
+                            // Say what landed, then wait for the host. The tool
+                            // sends `KBOOT` once it has read this line; a 60 s
+                            // deadline only exists so a tool that died mid-pair
+                            // cannot leave the board waiting forever.
                             diag::pair_ok(&mut ui.transport, slot, seq, len);
-                            Timer::after(Duration::from_millis(300)).await;
-                            diag::pair_ok(&mut ui.transport, slot, seq, len);
-                            // Long enough for the UART FIFO to drain before the reset wipes it:
-                            // 200 ms is ~2000 byte times at 115200, and the line
-                            // is 25 bytes. The first version used 80 ms and the
-                            // tool never saw KOK at all.
-                            Timer::after(Duration::from_millis(1200)).await;
-                            esp_hal::system::software_reset();
+                            pair_armed = true;
+                            pair_deadline = sys::now_ms().saturating_add(60_000);
                         }
                         None => diag::pair_bad(&mut ui.transport, "save"),
                     }
                 }
                 Err(err) => diag::pair_bad(&mut ui.transport, err.word()),
             }
+        }
+
+        // Pairing done and the host has said `KBOOT` (or never will).
+        if pair_armed && (reboot_now || sys::now_ms() >= pair_deadline) {
+            Timer::after(Duration::from_millis(50)).await;
+            esp_hal::system::software_reset();
         }
 
         if let Some(ver) = save_request {

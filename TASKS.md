@@ -473,3 +473,34 @@ live.bat                                                             # 真 CPU �
 2. 每个文件顶部写清楚它**不做什么**（边界比功能重要）
 3. 异常一律吞掉并计数，**不要让单个连接的错误杀掉整个 daemon**
 4. 所有魔数（端口、超时、间隔）提到文件顶部常量区
+
+#### C3 收尾（2026-10-26 13:14）—— 串口配对端到端跑通
+
+**链路**：`pcmon.pair --serial` → `firmware/pan.ps1`（.NET SerialPort）→ 板子写 flash → 回 `KRX`/`KOK` → 工具更新设备表。
+
+**实测一轮**（工具自己 mint、自己写、自己记账）：
+
+```
+PAIR mint client=st7735-160x80 key=719f2d21d9c1d4edaafda95469293037
+serial: KOK slot=A seq=24 len=32
+PAIR ok (board stored the key, table updated)
+```
+
+板子侧旁证：复位后 `STORE ok creds=yes slot=A seq=24` + `TOKEN ok len=32`；
+daemon 侧 `AUTH ok`（13:13:31）。**板子现在用的是一把 128 位随机 key，仓库里那个公开值彻底退休。**
+
+**两个必须记住的判断**
+
+1. **`pcmon.serialport.Port.read()` 在这台机器上读不到板子的输出**（同一时刻
+   `pan.ps1` 能读到 `KRX`/`KOK`）。所以 `pair --serial` 走 `pan.ps1`，不是走自家封装——
+   工具的可信度比代码的整洁度重要。`serialport.Port` 仍被 check_parity / live_serial 使用。
+2. **板子配对后不自己复位**，它打 `KOK` 后等 `KBOOT`（60 秒超时才兜底复位）。
+   原因：复位会让 CH343 重新枚举，回执跟着句柄一起消失——这正是之前
+   "写进去了但工具不知道"的根因。
+
+**排查时最有用的两个手法**
+
+- **候选 key 探测**：把可疑 key 逐个写进 `devices.json`（每次读盘，改一行就生效），
+  等板子重连，看哪一把 `AUTH ok`。不用重启 daemon，也不碰板子。
+- **`STORE ok … seq=` 是写盘的唯一证据**：`seq` 推进 = 真的写进 flash 了；
+  `KOK` 只证明"板子说它写了"。

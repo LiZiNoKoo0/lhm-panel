@@ -19,6 +19,8 @@ Usage
 """
 
 import argparse
+import os
+import subprocess
 import sys
 import time
 
@@ -99,98 +101,67 @@ def _ascii(text):
     return text.encode("ascii", "replace").decode("ascii")
 
 
+def _pan_script():
+    """`firmware/pan.ps1`, the serial path that is known to work on this box."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(here, "firmware", "pan.ps1")
+
+
 def cmd_serial(table, port, client_id, baud, timeout):
     """Board pairing: mint a key, hand it to the firmware, then record it.
 
     Order matters and it is the whole point of this function:
       1. mint a key in memory -- the device table is not touched yet;
-      2. write KW <key> to the board and wait for KOK;
+      2. write `KW <key>` to the board and wait for `KOK`;
       3. only then store it.
 
     The first version did (3) first and "rolled back" on failure, which deleted
     the board's *existing* entry -- turning a missing cable into "this board is
     no longer paired". A tool that can lose data when it fails is worse than one
     that refuses to run.
+
+    Transport: `firmware/pan.ps1` (.NET SerialPort). `pcmon.serialport.Port` is
+    the in-house path and it reads nothing on this machine (measured today: the
+    board answers `pan.ps1` with `KRX`/`KOK` and stays silent for `Port.read`),
+    so pairing uses the one that works rather than the one that looks tidier.
     """
     if not port or not client_id:
         raise SystemExit("pair: --serial needs --port and --client")
-    try:
-        from pcmon.serialport import Port
-    except ImportError as exc:  # pragma: no cover - module is in the tree
-        raise SystemExit("pair: cannot import pcmon.serialport: %s" % exc)
+    script = _pan_script()
+    if not os.path.isfile(script):
+        raise SystemExit("pair: cannot find %s" % script)
 
     key = devices_mod.new_key()
     print("PAIR mint client=%s key=%s" % (client_id, key))
-    link = None
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+           "-File", script, "-Port", port,
+           "-Seconds", str(int(timeout)), "-Lines", "KW %s" % key]
     try:
-        link = Port(port, baud)
-    except Exception as exc:  # noqa: BLE001 - report, do not traceback
-        raise SystemExit("pair: cannot open %s: %s (nothing written, table untouched)"
-                         % (port, exc))
-    try:
-        # Opening a COM port lets the driver assert DTR and RTS. On this board
-        # DTR is IO0 and RTS is EN, so an open can hold the chip in reset and
-        # then nothing answers -- which looks exactly like broken firmware.
-        link.release_board()
-        if not link.write_line("KW %s" % key):
-            raise SystemExit("pair: write to %s failed (table untouched)" % port)
-        deadline = time.monotonic() + timeout
-        seen = ""
-        sends = 0
-        next_send = 0.0
-        while time.monotonic() < deadline:
-            # The board resets right after a successful pair, which makes the
-            # CH343 re-enumerate and invalidates this handle. Reopen instead of
-            # reading a dead port until the deadline expires.
-            if link is None:
-                try:
-                    link = Port(port, baud)
-                    link.release_board()
-                except Exception:  # noqa: BLE001 - expected during re-enumeration
-                    link = None
-                    time.sleep(0.3)
-                    continue
-            # Resend every 2 s until the board answers. One write is not enough:
-            # the chip boots, then spends ~6 s on WiFi before the render task
-            # exists to read the UART, and anything sent in that window is gone.
-            # `check_parity.py` has retried its content line for the same reason
-            # since T1 -- a single shot here looked exactly like "KW unsupported".
-            now = time.monotonic()
-            if now >= next_send:
-                link.write_line("KW %s" % key)
-                sends += 1
-                next_send = now + 2.0
-            try:
-                chunk = link.read(4096)
-            except Exception:  # noqa: BLE001 - port vanished mid-read
-                try:
-                    link.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                link = None
-                chunk = b""
-            if chunk:
-                seen += chunk.decode("ascii", "replace")
-                if "KOK" in seen:
-                    for line in seen.strip().splitlines()[-3:]:
-                        print("serial: %s" % _ascii(line))
-                    table.add(client_id, key=key, note="serial %s" % port)
-                    print("PAIR ok (board stored the key, table updated; %d sends)" % sends)
-                    print("  the board reboots now and will authenticate with it")
-                    return 0
-            time.sleep(0.05)
-        for line in seen.strip().splitlines()[-4:]:
-            print("serial: %s" % _ascii(line))
-        print("serial: no KOK within %gs after %d sends (a KFAIL line above says why)"
-              % (timeout, sends))
-        print("        Nothing was written to the table; the board keeps its old key.")
-        return 1
-    finally:
-        try:
-            if link is not None:
-                link.close()
-        except Exception:  # noqa: BLE001
-            pass
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout + 25)
+        raw = (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        raw = ""
+        print("pair: pan.ps1 did not return; nothing was recorded")
+
+    lines = [_ascii(line.strip()) for line in raw.splitlines() if line.strip()]
+    kok = [line for line in lines if "KOK" in line]
+    if kok:
+        print("serial: %s" % kok[-1])
+        for line in lines[-3:]:
+            if line not in kok:
+                print("serial: %s" % line)
+        table.add(client_id, key=key, note="serial %s" % port)
+        print("PAIR ok (board stored the key, table updated)")
+        print("  the board reboots now and will authenticate with it")
+        return 0
+
+    kfail = [line for line in lines if "KFAIL" in line]
+    for line in (kfail or lines[-4:]):
+        print("serial: %s" % line)
+    print("serial: no KOK within %gs (a KFAIL line above says why)" % timeout)
+    print("        Nothing was written to the table; the board keeps its old key.")
+    return 1
 
 
 def parse_args(argv=None):
