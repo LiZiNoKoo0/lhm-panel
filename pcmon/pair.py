@@ -87,47 +87,108 @@ def cmd_prune(table, days):
     return 0
 
 
-def cmd_serial(table, port, client_id, baud, timeout):
-    """Board pairing: mint a key, then hand it to the firmware over the wire.
+def _ascii(text):
+    """Anything from the wire, safe to print on a GBK console.
 
-    The firmware side (card C3) accepts one line `KW <32 hex>`. Until that lands
-    this will time out -- it says so instead of pretending to have worked.
+    Serial bytes are not text: a partial UTF-8 sequence or line noise decodes to
+    U+FFFD, and printing that raises UnicodeEncodeError on this machine's
+    console code page -- which crashed the pairing tool *after* it had already
+    written a key into the device table, leaving the board authenticating with a
+    key nobody had. Print through here, always.
+    """
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+def cmd_serial(table, port, client_id, baud, timeout):
+    """Board pairing: mint a key, hand it to the firmware, then record it.
+
+    Order matters and it is the whole point of this function:
+      1. mint a key in memory -- the device table is not touched yet;
+      2. write KW <key> to the board and wait for KOK;
+      3. only then store it.
+
+    The first version did (3) first and "rolled back" on failure, which deleted
+    the board's *existing* entry -- turning a missing cable into "this board is
+    no longer paired". A tool that can lose data when it fails is worse than one
+    that refuses to run.
     """
     if not port or not client_id:
         raise SystemExit("pair: --serial needs --port and --client")
     try:
-        from pcmon import serialport
-    except ImportError as exc:  # pragma: no cover - module is part of the tree
+        from pcmon.serialport import Port
+    except ImportError as exc:  # pragma: no cover - module is in the tree
         raise SystemExit("pair: cannot import pcmon.serialport: %s" % exc)
 
-    key = table.add(client_id, note="serial %s" % port)
+    key = devices_mod.new_key()
     print("PAIR mint client=%s key=%s" % (client_id, key))
+    link = None
     try:
-        link = serialport.SerialLink(port, baud)
+        link = Port(port, baud)
     except Exception as exc:  # noqa: BLE001 - report, do not traceback
-        table.revoke(client_id)
-        raise SystemExit("pair: cannot open %s: %s (key rolled back)" % (port, exc))
+        raise SystemExit("pair: cannot open %s: %s (nothing written, table untouched)"
+                         % (port, exc))
     try:
-        link.write(("KW %s\n" % key).encode("ascii"))
+        # Opening a COM port lets the driver assert DTR and RTS. On this board
+        # DTR is IO0 and RTS is EN, so an open can hold the chip in reset and
+        # then nothing answers -- which looks exactly like broken firmware.
+        link.release_board()
+        if not link.write_line("KW %s" % key):
+            raise SystemExit("pair: write to %s failed (table untouched)" % port)
         deadline = time.monotonic() + timeout
         seen = ""
+        sends = 0
+        next_send = 0.0
         while time.monotonic() < deadline:
-            chunk = link.read(0.2)
-            if not chunk:
-                continue
-            seen += chunk.decode("ascii", "replace")
-            if "KOK" in seen:
-                print("serial: %s" % seen.strip().splitlines()[-1])
-                print("PAIR ok (firmware accepted the key)")
-                return 0
-        table.revoke(client_id)
-        print("serial: no KOK within %gs. The firmware in flash does not speak `KW`"
-              % timeout)
-        print("        yet (card C3). Key rolled back so the table has no ghost entry.")
+            # The board resets right after a successful pair, which makes the
+            # CH343 re-enumerate and invalidates this handle. Reopen instead of
+            # reading a dead port until the deadline expires.
+            if link is None:
+                try:
+                    link = Port(port, baud)
+                    link.release_board()
+                except Exception:  # noqa: BLE001 - expected during re-enumeration
+                    link = None
+                    time.sleep(0.3)
+                    continue
+            # Resend every 2 s until the board answers. One write is not enough:
+            # the chip boots, then spends ~6 s on WiFi before the render task
+            # exists to read the UART, and anything sent in that window is gone.
+            # `check_parity.py` has retried its content line for the same reason
+            # since T1 -- a single shot here looked exactly like "KW unsupported".
+            now = time.monotonic()
+            if now >= next_send:
+                link.write_line("KW %s" % key)
+                sends += 1
+                next_send = now + 2.0
+            try:
+                chunk = link.read(4096)
+            except Exception:  # noqa: BLE001 - port vanished mid-read
+                try:
+                    link.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                link = None
+                chunk = b""
+            if chunk:
+                seen += chunk.decode("ascii", "replace")
+                if "KOK" in seen:
+                    for line in seen.strip().splitlines()[-3:]:
+                        print("serial: %s" % _ascii(line))
+                    table.add(client_id, key=key, note="serial %s" % port)
+                    print("PAIR ok (board stored the key, table updated; %d sends)" % sends)
+                    print("  the board reboots now and will authenticate with it")
+                    return 0
+            time.sleep(0.05)
+        for line in seen.strip().splitlines()[-4:]:
+            print("serial: %s" % _ascii(line))
+        print("serial: no KOK within %gs after %d sends (a KFAIL line above says why)"
+              % (timeout, sends))
+        print("        Nothing was written to the table; the board keeps its old key.")
         return 1
     finally:
         try:
-            link.close()
+            if link is not None:
+                link.close()
         except Exception:  # noqa: BLE001
             pass
 

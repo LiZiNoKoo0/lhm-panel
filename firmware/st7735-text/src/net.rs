@@ -84,6 +84,23 @@ static STORE: Mutex<CriticalSectionRawMutex, Option<Store<'static>>> = Mutex::ne
 ///
 /// `None` means the store never opened, which is a boot-time failure already
 /// reported as `STORE fail`; callers treat it the same as a failed write.
+/// Write a new pairing key into the stored record (PROTOCOL.md s.2.3).
+///
+/// Returns `(slot letter, seq, key length)` on success. Everything it does goes
+/// through the record that is already there: the SSID and psk are preserved, and
+/// only the token field is replaced. An empty or missing record is a refusal,
+/// not an invitation to invent WiFi settings.
+pub async fn pair_key(new_key: &str) -> Option<(u8, u32, usize)> {
+    with_store(|store| {
+        let creds = store.load().creds?;
+        let updated = creds.with_token(new_key)?;
+        let (slot, seq) = store.save_reporting(&updated)?;
+        Some((slot.letter(), seq, updated.token().len()))
+    })
+    .await
+    .flatten()
+}
+
 pub async fn with_store<R>(f: impl FnOnce(&mut Store<'static>) -> R) -> Option<R> {
     let mut guard = STORE.lock().await;
     guard.as_mut().map(f)

@@ -199,7 +199,7 @@ python tools/pair.py --port COM10 --client-id esp32-a
   -> K = secrets.token_bytes(16)                 # 32 个 hex 字符
   -> 串口一行:  KW <32 hex>
   -> 固件写 A/B 记录、读回校验
-  -> 串口回:    KOK slot=B seq=5 crc=0x...
+  -> 串口回:    KOK slot=B seq=5 len=32
   -> 工具把 K 写进 daemon 设备表
 ```
 

@@ -25,7 +25,7 @@
 |---|---|---|---|
 | C1 | `PROTOCOL.md` v0.6：§2 重写（三帧挑战应答）、§2.1 握手、§2.2 配对、§2.3 串口配对、§2.4 密钥生命周期、§2.5 威胁模型、§2.6 服务模式；§4 消息总表、§5 hello、§18/§19 样例、§20 兼容表同步 | ✅ 完成（2026-10-25） | 文档已落盘；`hello` 不再带 `token`，残留提及只剩变更摘要与兼容表 |
 | C2 | PC 侧实现：`pcmon/protocol.py` 的 mac/srv/challenge/auth、`fake_daemon.py` 握手门 + `--auth hmac\|static\|any` + 失败锁定、`term_tk`/`webui`/`launcher` 应答挑战、`pcmon/devices.py` 设备表 + `pcmon/pair.py`、`tools/check_auth.py` | ✅ 完成（2026-10-25） | `tools/check_auth.py` → **AUTH OK (12 checks)**（含重放拒绝、错 mac、跨 client_id 不通用、认证前零泄漏、5 s 超时、第 6 次 locked、static 模式两态）；`python -m pcmon.protocol` → **ALL OK 12/12**（含两条钉死的 mac/srv 向量）；`term_tk.py --selftest` → **22/22 PASS**（现在走的是真握手，不再是 --lenient 旁路） |
-| C3 | 固件：`sha256.rs` + `auth.rs`（no_std、NIST/RFC 向量）、`wire` hello 去 token、`session` 的 `Challenged` 态、`net_link` 验 srv + 回 mac、三条串口行；串口 `KW` 配对**未做** | 🟡 1–3 上板验过 / 4 未开工（2026-10-26 01:20） | `cargo test` 203 绿（含 `auth::mac_matches_the_python_side`）；固件零 warning；板上两次 `AUTH ok`：`[01:14:20]` 首次、`[01:14:41]` 复位后自动重连 |
+| C3 | 固件：`sha256.rs` + `auth.rs`、`wire` hello 去 token、`session` 的 `Challenged` 态、`net_link` 验 srv + 回 mac、三条串口行；串口 `KW` 配对（固件写盘已验，工具回执未验） | 🟡 1–3 上板验过；4 固件侧验过、工具侧未验（2026-10-26 13:01） | `cargo test` 207 绿、零 warning；板上 `AUTH ok` 用的是**真实 128 位 key** `5f2c1b7a…`；`STORE ok slot=A seq=8`（曾 B/5）证明 `KW` 写盘成功 |
 | C5 | 手机：webui 放开 + HTTPS 自签 + 6 位配对码 + cookie 会话 | ⬜ 未开工 | |
 | C6 | 指标源可插拔（服务器 / Linux 没有 LHM） | ⬜ 未开工 | |
 
@@ -63,20 +63,33 @@
 所以 `LINK challenge` / `LINK auth tx n=` 这两行抓不到；它们确实执行了，
 证据是 daemon 回了 `AUTH ok`（mac 不对不可能通过）。
 
-**下一步（按顺序）**：
+**下一步（按顺序）**
 
-1. `creds`/`store` 写路径接一条 `KW <32hex>`：写 A/B、读回校验、回 `KOK slot=… seq=… crc=…`
-2. `pair --serial COM10 --client st7735-160x80` 生成 128 位随机 key 写进板子，同时更新 `devices.json`
-3. 换掉 `daemon.token` 里的公开值，`launcher.py` 默认改 `--auth hmac`
-4. `check_auth.py` 里加一条「板子同款 hello」的回归（现在它测的是 PC 侧客户端）
+1. **修 KOK 捕获**：配对成功后板子立刻 `software_reset()`，CH343 随之重新枚举，
+   回执跟着句柄一起没了。推荐改法：**配对后不自动复位** —— 先打 `KOK`，等工具发
+   `KBOOT` 再复位。把等待时间从 200 ms 加到 1.5 s 也试过，不够，说明丢的是 USB 侧字节。
+2. `pair --serial` 的"掉线重开"要等第 1 条生效才有意义（现在回执根本读不到）。
+3. `launcher.py` 默认 `--auth any` 可以改成 `hmac` 了（板子不再需要旧路径）。
+4. `daemon.token` 里那个公开值彻底删掉，别再有地方引用它。
 
-**验收状态必须如实区分**：「✅ 完成」= 本次会话跑过并能复现；「⚠️ 完成未验」= 代码在，但验收项没跑。
-不要把「文件存在」当成「验收通过」——上一版 `HANDOVER` 就因此写着 T6a 未接线。
+**2026-10-26 13:01 的现场（已验证可用）**
 
-### 三项验收结果（2026-10-25 10:17，全部通过）
+- 板子 key = `5f2c1b7a9e3d4c6081a2b3c4d5e6f708`（128 位随机，由 `KW` 写进 flash）
+- `devices.json` 里 `st7735-160x80` 就是它；`webui` 是仪表盘自配对的那条
+- daemon 以 `--auth hmac` 跑，板子 `AUTH ok`，连接保持
+- **仓库里那个公开的 `0123456789abcdef` 已经作废**
 
-| 项 | 结果 | 证据 |
-|---|---|---|
+**这一轮学到的三条**
+
+1. **开串口会复位板子**（DTR=IO0、RTS=EN）。所以"打开端口立刻发一行再等回执"在这块
+   板子上天生不可靠：板子重启、CH343 重新枚举，回执和句柄一起消失。
+2. **写盘成功 ≠ 工具知道**。`STORE ok slot=… seq=…` 的推进才是"写进去了"的证据；
+   板子手里是哪把 key，可以用"把候选 key 逐个写进设备表、看哪一把 `AUTH ok`"反推
+   （表是每次读盘的，改一行就生效，不用重启 daemon）。
+3. **.NET 的 CWD 不是 shell 的 CWD**：`[System.IO.File]::ReadAllBytes('相对路径')` 会去
+   `C:\Users\Administrator\.openclaw\workspace` 找文件。一律用绝对路径。
+
+---|---|---|
 | **M3** 桌面终端 | ✅ **PASS** | `term_tk.py --selftest` → `SELFTEST PASS (22 checks, 0 failed)`，1.4 s |
 | **M4** 回放一致性 | ✅ **PASS** | `tools/check_replay_parity.py` → `PARITY OK`，逐帧比对 60/60 完全相同（除 `s` 序号） |
 | **M5** 桥接掉线 | ✅ **PASS** | 杀 `lhm_bridge.exe` → **0.3 秒**全部 6 个值变 `null`（要求 3 秒内）；桥接自动重启 → `live=6` 恢复 |

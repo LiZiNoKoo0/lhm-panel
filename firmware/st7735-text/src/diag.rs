@@ -385,6 +385,45 @@ pub fn link_tx(t: &mut dyn Transport, bytes: &[u8]) {
 /// No fields on purpose: the nonce is 32 hex characters nobody reads by eye,
 /// and a value that only ever needs to be *used* does not belong in a log. What
 /// an operator needs to know is "the challenge arrived", and that is this line.
+/// `KOK slot=B seq=5 len=32` -- a pairing key was written and proven.
+///
+/// Three numbers, because all three have failed separately in this project: the
+/// slot says which half of the A/B pair took it, `seq` says the save moved
+/// forward, and `len` says the key really has the length the tool sent.
+pub fn pair_ok(t: &mut dyn Transport, slot: u8, seq: u32, len: usize) {
+    let mut line = [0u8; 64];
+    let mut at = put(&mut line, b"KOK slot=");
+    at += put(&mut line[at..], &[slot]);
+    at += put(&mut line[at..], b" seq=");
+    at += put_dec(&mut line[at..], seq);
+    at += put(&mut line[at..], b" len=");
+    at += put_dec(&mut line[at..], len as u32);
+    at += put(&mut line[at..], b"\n");
+    let _ = t.write_all(&line[..at]);
+}
+
+/// `KFAIL reason=<word>` -- the pairing line was refused, nothing was written.
+/// KRX len=<n> -- a pairing key arrived on the UART.
+///
+/// Split from KOK on purpose: when pairing fails, the first question is
+/// whether the line was even understood. "No KRX" means the bytes never
+/// became a line; "KRX but no KOK" means the write or the flash refused.
+pub fn pair_rx(t: &mut dyn Transport, len: usize) {
+    let mut line = [0u8; 32];
+    let mut at = put(&mut line, b"KRX len=");
+    at += put_dec(&mut line[at..], len as u32);
+    at += put(&mut line[at..], b"\n");
+    let _ = t.write_all(&line[..at]);
+}
+
+pub fn pair_bad(t: &mut dyn Transport, reason: &str) {
+    let mut line = [0u8; 48];
+    let mut at = put(&mut line, b"KFAIL reason=");
+    at += put(&mut line[at..], reason.as_bytes());
+    at += put(&mut line[at..], b"\n");
+    let _ = t.write_all(&line[..at]);
+}
+
 pub fn link_challenge(t: &mut dyn Transport) {
     let _ = t.write_all(b"LINK challenge\n");
 }

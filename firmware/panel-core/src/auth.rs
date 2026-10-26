@@ -113,6 +113,67 @@ pub fn auth_into(mac: &[u8; MAC_HEX], out: &mut [u8]) -> Option<usize> {
     Some(total)
 }
 
+/// Why a `KW` line was refused. The words go on the wire, so they are short
+/// and stable -- an operator greps them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KwError {
+    /// Wrong number of characters after `KW `.
+    Length,
+    /// Right length, but not lowercase hex.
+    Hex,
+}
+
+impl KwError {
+    pub fn word(self) -> &'static str {
+        match self {
+            KwError::Length => "length",
+            KwError::Hex => "hex",
+        }
+    }
+}
+
+/// One line off the UART, classified for pairing (PROTOCOL.md s.2.3).
+pub enum KwLine<'a> {
+    /// Not a pairing line at all; the caller should treat it as content.
+    NotKw,
+    /// Starts with `KW` but the key is unusable.
+    Bad(KwError),
+    /// `KW <32 hex>`: here is the key.
+    Key(&'a str),
+}
+
+/// Parse `KW <32 hex>`.
+///
+/// Deliberately strict: exactly one space, exactly [`KEY_HEX_CHARS`] characters,
+/// lowercase hex only. A pairing line that "almost" works is worse than one that
+/// is refused, because the tool on the other end is waiting for `KOK` and a
+/// fuzzy match would leave the board storing one string and the daemon another.
+pub fn kw_line(line: &[u8]) -> KwLine<'_> {
+    if line.len() < 2 || line[0] != b'K' || line[1] != b'W' {
+        return KwLine::NotKw;
+    }
+    if line.len() < 3 || line[2] != b' ' {
+        return KwLine::Bad(KwError::Length);
+    }
+    let key = &line[3..];
+    if key.len() != KEY_HEX_CHARS {
+        return KwLine::Bad(KwError::Length);
+    }
+    for byte in key {
+        let ok = matches!(byte, b'0'..=b'9' | b'a'..=b'f');
+        if !ok {
+            return KwLine::Bad(KwError::Hex);
+        }
+    }
+    match core::str::from_utf8(key) {
+        Ok(text) => KwLine::Key(text),
+        Err(_) => KwLine::Bad(KwError::Hex),
+    }
+}
+
+/// Length of a key as text: 32 hex characters (128 bits).
+pub const KEY_HEX_CHARS: usize = 32;
+
 /// Upper bound for [`auth_into`]'s buffer: head + mac + tail.
 pub const AUTH_LINE_CAP: usize = AUTH_HEAD_LEN + MAC_HEX + 2;
 
@@ -197,5 +258,36 @@ mod tests {
         // Too small a buffer is a compile-time-sized mistake, not a panic.
         let mut small = [0u8; 8];
         assert!(auth_into(&mac, &mut small).is_none());
+    }
+
+    #[test]
+    fn kw_line_accepts_exactly_the_documented_shape() {
+        let key = "5e1f7c3a9b2d48e6a0c4f8b1d3e50729";
+        let line = format!("KW {}", key);
+        match kw_line(line.as_bytes()) {
+            KwLine::Key(parsed) => assert_eq!(parsed, key),
+            _ => panic!("a valid KW line must parse"),
+        }
+    }
+
+    #[test]
+    fn kw_line_refuses_everything_else() {
+        // Not a pairing line: the bench renderer owns these.
+        assert!(matches!(kw_line(b"CPU 33.5%|TEMP 34C"), KwLine::NotKw));
+        assert!(matches!(kw_line(b"KX 5e1f7c3a9b2d48e6a0c4f8b1d3e50729"), KwLine::NotKw));
+        // Wrong length (the classic: a 16-character v0.5 token).
+        assert!(matches!(kw_line(b"KW 0123456789abcdef"), KwLine::Bad(KwError::Length)));
+        assert!(matches!(kw_line(b"KW"), KwLine::Bad(KwError::Length)));
+        assert!(matches!(kw_line(b"KW "), KwLine::Bad(KwError::Length)));
+        // Right length, not hex -- and uppercase is refused on purpose, because
+        // the tool and the firmware must agree byte for byte.
+        let mut bad = [b'0'; 35];
+        bad[..3].copy_from_slice(b"KW ");
+        bad[10] = b'g';
+        assert!(matches!(kw_line(&bad), KwLine::Bad(KwError::Hex)));
+        assert!(matches!(
+            kw_line(b"KW 5E1F7C3A9B2D48E6A0C4F8B1D3E50729"),
+            KwLine::Bad(KwError::Hex)
+        ));
     }
 }

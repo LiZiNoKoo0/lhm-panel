@@ -522,3 +522,21 @@ fn link_srv_bad_is_pinned() {
     // refuses to authenticate" stops matching the logs.
     assert_eq!(text_of(|t| diag::link_srv_bad(t)), "LINK srv bad\n");
 }
+
+#[test]
+fn pair_ok_is_pinned() {
+    // Slot, sequence and key length: the three numbers the pairing tool waits
+    // for before it trusts that the board really stored what it sent.
+    assert_eq!(
+        text_of(|t| diag::pair_ok(t, b'B', 5, 32)),
+        "KOK slot=B seq=5 len=32\n"
+    );
+}
+
+#[test]
+fn pair_bad_is_pinned() {
+    assert_eq!(
+        text_of(|t| diag::pair_bad(t, "length")),
+        "KFAIL reason=length\n"
+    );
+}

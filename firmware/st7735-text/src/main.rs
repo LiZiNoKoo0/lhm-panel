@@ -420,6 +420,10 @@ async fn ui_task(mut ui: Ui) -> ! {
     // already borrows the transport and the inbox, and a flash erase in the
     // middle of a half-dispatched frame is not a thing to do.
     let mut save_request: Option<u32> = None;
+    //: A pairing line seen on the UART (`KW <32 hex>`), handled after the
+    //: dispatch closure because writing flash is async and the closure is not.
+    let mut pair_request: Option<Result<[u8; panel_core::auth::KEY_HEX_CHARS],
+                                     panel_core::auth::KwError>> = None;
     // Whether the badge is on the glass right now. Kept here rather than inside
     // the scene: the badge is not part of any layout, and a scene that had to
     // know about the link would be asking the wrong layer.
@@ -450,7 +454,19 @@ async fn ui_task(mut ui: Ui) -> ! {
             let mut sink = log::ChanLog::new();
             let now = sys::now_ms();
             inbox.poll(&mut sources, rx, |route, line| match route {
-                Route::Bench => scene.apply(line),
+                Route::Bench => match panel_core::auth::kw_line(line) {
+                    // v0.6 pairing (PROTOCOL.md s.2.3). Recognised *before* the
+                    // bench renderer: a `KW` line is not content, and drawing
+                    // it would put two rows of hex on the glass.
+                    panel_core::auth::KwLine::Key(key) => {
+                        let mut buf = [0u8; panel_core::auth::KEY_HEX_CHARS];
+                        buf.copy_from_slice(key.as_bytes());
+                        pair_request = Some(Ok(buf));
+                        diag::pair_rx(&mut sink, key.len());
+                    }
+                    panel_core::auth::KwLine::Bad(err) => pair_request = Some(Err(err)),
+                    panel_core::auth::KwLine::NotKw => scene.apply(line),
+                },
                 Route::Proto => match page.feed(line, now) {
                     Feed::Layout => {
                         let shown = page.layout().unwrap();
@@ -507,6 +523,36 @@ async fn ui_task(mut ui: Ui) -> ! {
         // write budget, so this follows the operator's edits, not the frame
         // rate. A failure leaves the picture alone and says so, because the
         // silent version of this bug is "the new page survives until reboot".
+        // Pairing: write the key, say what landed, then reboot. The link task
+        // leaked the key it read at boot, so continuing to run would mean the
+        // board authenticates with a key it no longer stores.
+        if let Some(request) = pair_request.take() {
+            match request {
+                Ok(buf) => {
+                    let key = core::str::from_utf8(&buf).unwrap_or("");
+                    match crate::net::pair_key(key).await {
+                        Some((slot, seq, len)) => {
+                            // Twice, 300 ms apart: the reset below makes the
+                            // CH343 re-enumerate, and whatever is still in the
+                            // USB side of the pipe at that moment is gone. Two
+                            // copies cost 25 bytes and remove that race.
+                            diag::pair_ok(&mut ui.transport, slot, seq, len);
+                            Timer::after(Duration::from_millis(300)).await;
+                            diag::pair_ok(&mut ui.transport, slot, seq, len);
+                            // Long enough for the UART FIFO to drain before the reset wipes it:
+                            // 200 ms is ~2000 byte times at 115200, and the line
+                            // is 25 bytes. The first version used 80 ms and the
+                            // tool never saw KOK at all.
+                            Timer::after(Duration::from_millis(1200)).await;
+                            esp_hal::system::software_reset();
+                        }
+                        None => diag::pair_bad(&mut ui.transport, "save"),
+                    }
+                }
+                Err(err) => diag::pair_bad(&mut ui.transport, err.word()),
+            }
+        }
+
         if let Some(ver) = save_request {
             let saved_ok = match page.layout() {
                 Some(layout) => crate::net::with_store(|s| s.save_layout(layout))

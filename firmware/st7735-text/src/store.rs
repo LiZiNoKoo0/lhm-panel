@@ -284,10 +284,23 @@ impl<'d> Store<'d> {
     /// prefers the other slot -- leaves the old copy in charge and reports
     /// false, because "it said OK" is not evidence.
     pub fn save(&mut self, creds: &WifiCreds) -> bool {
+        self.save_reporting(creds).is_some()
+    }
+
+    /// Same write as [`Store::save`], but says *where* it landed.
+    ///
+    /// The pairing path has to print `KOK slot=B seq=5` (PROTOCOL.md s.2.3), and
+    /// inventing a second write path to obtain those two numbers is how the
+    /// "two implementations" bug gets in. So `save` delegates here instead.
+    pub fn save_reporting(&mut self, creds: &WifiCreds) -> Option<(Slot, u32)> {
         let active = self.best();
         let target = active.map(|c| c.slot.other()).unwrap_or(Slot::A);
         let seq = active.map(|c| c.seq.wrapping_add(1)).unwrap_or(1);
-        self.save_to(target, seq, creds)
+        if self.save_to(target, seq, creds) {
+            Some((target, seq))
+        } else {
+            None
+        }
     }
 
     /// The body of `save`, with the slot and sequence number given explicitly:
