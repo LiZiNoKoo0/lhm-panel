@@ -781,7 +781,11 @@ def main(argv=None):
                   require_auth=True if args.require_auth else None,
                   pair_ttl=args.pair_ttl,
                   tls={'certfile': args.tls_cert, 'keyfile': args.tls_key})
-    url = "http://%s:%d/" % (args.host, args.port)
+    # Name the scheme actually served: with --tls-* this is https, and a banner
+    # that says http:// sends the next reader hunting a client bug that is
+    # really "you are talking to the wrong scheme" (and --open would too).
+    scheme = "https" if (args.tls_cert and args.tls_key) else "http"
+    url = "%s://%s:%d/" % (scheme, args.host, args.port)
     print("webui: %s  (daemon %s:%s, %dx%d, client_id=%s)"
           % (url, host, port_text or "7802", w, h, args.client_id))
     print("webui: cwd=%s  Ctrl-C to stop" % here)

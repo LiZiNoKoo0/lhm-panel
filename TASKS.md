@@ -721,3 +721,45 @@ Linux 实测（这台手机）：`cpu.total` 从 24.4% 变 4.4%、`mem.used` 91.
 **一条自嘲但真的教训**：这轮我自己的补丁脚本连炸三次——单行模式被算两次、
 "`SOURCE_LHM` 一处都不许剩"的断言（banner 那行本来就该留）、`def values()` 出现次数的假设错。
 三次都是"断言比事实更严"。补丁脚本的自检要检**必须成立的事**，不是**我以为的事**。
+
+#### 验收套件：一条命令跑完（2026-10-27）
+
+以前是"挨个手跑 8 个脚本"，其中 3 个会红，而且红得各不相同。现在：
+
+```
+python tools\run_suite.py            -> SUITE OK (8 checks, 0 failed)
+python tools\run_suite.py --quick    -> 只跑不需要夹具的 5 条
+```
+
+| 检查 | 需要什么 | 现在的结论 |
+|---|---|---|
+| protocol selftest | — | ALL OK (12/12) |
+| auth (C2) | — | AUTH OK (12 checks) |
+| pairing codes | — | PAIRING OK (12 checks) |
+| web pairing | — | WEB PAIRING OK (14 checks) |
+| sources (C6) | — | SOURCES OK (36 checks) |
+| term_tk selftest | `layouts/applied.json` 先挪开 | SELFTEST PASS (22 checks) |
+| replay parity | 起 replay + `capture_tape.py` 造 `_captured.ndjson` | PARITY OK（74/74 帧相同） |
+| web hkdf | https 上跑 webui（`--require-auth` + `--token`）+ 客户端信任自签证书 | WEB HKDF OK |
+
+`run_suite.py` 自己搭夹具、跑完复原：`applied.json` 挪开→跑→放回并按 sha256 验证
+**原样还回去**；起 `replay.py --speed 4` → `capture_tape.py 7802 _captured.ndjson 74` → 杀；
+起 `pcmon.webui --require-auth --token … --tls-*` 在 7813，跑完杀。
+
+**三个坑，都是"看着像回归、其实不是"**
+
+1. **M3 自检断言的是"当前生效布局"**（老坑，2026-10-25 记过一次，今天又踩）：
+   `layouts/applied.json` 里没有 `bind_w` 节点，于是 `bind_w_scaled` 报 `rects=0`。挪开就是 22/22。
+2. **`check_web_hkdf.mjs` 必须让服务端带 `--require-auth`**：默认 loopback 免鉴权（设计如此），
+   所以"错 key 被拒"这条断言在默认配置下**不可能**成立，会报 200。脚本头部的用法示例漏了这个参数。
+3. **端口上的旧实例会冒充新实例**：几轮 `fetch failed` 与 `200` 交替，真相是 7803 被更早的一个
+   webui（没有 `--require-auth`）占着，我新起的那个压根没绑定成功。**"它答了 200"不等于"你的实例在跑"**，
+   要看 `netstat -ano | findstr :7803` 的 pid。
+
+**修掉的一个真 bug**：`webui.py` 的 banner 把 URL 写死成 `http://`，而带 `--tls-*` 时它服务的是
+https。误导性极强：客户端照 banner 去连得到 `fetch failed`，看起来像前端坏了。现在按
+`--tls-cert/--tls-key` 决定 scheme，`--open` 也一并正确。
+
+**TLS 现状**：`tls/server.crt` 的 SAN 含 `localhost` / `127.0.0.1` / `192.168.1.128`，名字没问题；
+但 `tls/ca` 是空的、证书从未导入系统信任库，所以 `node --use-system-ca` 帮不上。套件里用
+`NODE_TLS_REJECT_UNAUTHORIZED=0` 跑并在报告里写明——这条验的是 HKDF 参数是否一致，不是信任链。
