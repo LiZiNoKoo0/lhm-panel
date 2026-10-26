@@ -78,7 +78,18 @@ function editorSetNote(text, kind) {
 
 async function editorLoad() {
   try {
-    const response = await fetch('/api/layout', {cache: 'no-store'});
+    // authHeaders() lives in app.js; both files are loaded as classic scripts,
+    // so this route has to carry the key too -- without it the editor 401s even
+    // on a perfectly paired browser, and the failure surfaces as "startup failed".
+    const response = await fetch('/api/layout', {
+      cache: 'no-store',
+      headers: authHeaders(),
+    });
+    if (response.status === 401) {
+      // Unpaired is the page's problem, not the editor's: hand it to the gate.
+      showPairing('这台设备还没有配对。请在运行仪表盘的电脑上读取 6 位配对码。');
+      throw new Error('unpaired');
+    }
     const data = await response.json();
     editor.appliedVer = Number(data.ver) || 1;
     editor.applied = data.scenes || {};
@@ -510,7 +521,7 @@ async function editorApply() {
   try {
     const response = await fetch('/api/layout/apply', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: authHeaders({'Content-Type': 'application/json'}),
       body: JSON.stringify({scenes: editor.draft}),
     });
     const data = await response.json();

@@ -37,6 +37,7 @@ WHAT THIS FILE DELIBERATELY DOES NOT DO
 
 import argparse
 import collections
+import hashlib
 import hmac
 import json
 import secrets
@@ -389,6 +390,16 @@ class Handler(BaseHTTPRequestHandler):
             return "local"
         who = self._who()
         if who is None:
+            # TEMPORARY diagnostic: "paired but still 401" has two very different
+            # causes -- the browser never stored a key, or it stored a different
+            # one. Record a fingerprint, never the token itself.
+            tok = self._bearer() or ""
+            print("AUTH 401 from=%s path=%s token=%s" % (
+                self.client_address[0] if self.client_address else "?",
+                self.path,
+                "none" if not tok else "len=%d sha8=%s" % (
+                    len(tok), hashlib.sha256(tok.encode()).hexdigest()[:8])),
+                flush=True)
             self._json({"error": "pair this browser first: POST /pair/claim",
                         "pair": "/pair/begin"}, 401)
             return None
@@ -457,6 +468,11 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, payload, status=200):
         body = payload if isinstance(payload, bytes) else \
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        # TEMPORARY: one line per JSON response. This class deliberately turns
+        # off http.server's own logging further down, and "the page showed no
+        # overlay" was indistinguishable from "the page never asked anything".
+        print("REQ %s %s -> %s" % (self.address_string(), self.path, status),
+              flush=True)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -471,6 +487,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         with open(path, "rb") as handle:
             body = handle.read()
+        # TEMPORARY: static loads are the only evidence that the phone actually
+        # re-fetched the page. Without this, "no API calls arrived" could mean the
+        # tab never reloaded or that the script died before its first fetch.
+        print("STATIC %s /%s -> 200 (%d bytes)" % (
+            self.address_string(), name, len(body)), flush=True)
         ext = os.path.splitext(name)[1]
         self.send_response(200)
         self.send_header("Content-Type", CONTENT_TYPES.get(ext, "application/octet-stream"))
@@ -526,6 +547,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/pair/claim":
             self._pair_claim()
+            return
+        if path == "/debug/client-error":
+            # TEMPORARY: the page renders white and never issues an API call, so
+            # there is no server-side trace of what broke. Have the browser post
+            # its own error instead of asking the operator to open devtools.
+            body = self._read_json()
+            print("CLIENT ERROR from=%s %s" % (
+                self.client_address[0] if self.client_address else "?",
+                json.dumps(body, ensure_ascii=False)), flush=True)
+            self._json({"ok": True})
             return
         if self._need_auth() is None:
             return
@@ -654,14 +685,18 @@ def _is_loopback(host):
 
 
 def serve(host, port, link, layout_path=None, sessions_path=None, tls=None,
-          require_auth=None):
+          require_auth=None, pair_ttl=None):
     Handler.link = link
     #: Loopback needs no pairing (the caller is the operator); anything else
     #: must pair. `require_auth=True` forces the gate on -- which is what the
     #: acceptance test does, so the tested path is the strict one.
     Handler.require_auth = (not _is_loopback(host)) if require_auth is None \
         else bool(require_auth)
-    Handler.codes = pairing.PairingCodes()
+    #: CODE_TTL_S (60 s) is the protocol default and stays the default here.
+    #: `pair_ttl` exists only so a test can let a human read the code off the
+    #: console and type it without racing a stopwatch.
+    Handler.codes = (pairing.PairingCodes() if pair_ttl is None
+                     else pairing.PairingCodes(ttl=pair_ttl))
     #: Paired browsers, in the same table shape as the daemon's devices: one
     #: writer, atomic saves, revocation is deleting a row.
     Handler.sessions = DeviceTable(
@@ -710,6 +745,10 @@ def main(argv=None):
                              "(--layouts); the editor reads and applies through it")
     parser.add_argument("--open", action="store_true",
                         help="open the dashboard window when it is ready")
+    parser.add_argument("--pair-ttl", type=float, default=None,
+                        help="seconds a pairing code stays valid (default: the "
+                             "protocol's 60). Raise it only for testing -- a "
+                             "longer window is a weaker proof.")
     args = parser.parse_args(argv)
 
     try:
@@ -726,6 +765,7 @@ def main(argv=None):
 
     httpd = serve(args.host, args.port, link, args.layouts, sessions_path=args.sessions,
                   require_auth=True if args.require_auth else None,
+                  pair_ttl=args.pair_ttl,
                   tls={'certfile': args.tls_cert, 'keyfile': args.tls_key})
     url = "http://%s:%d/" % (args.host, args.port)
     print("webui: %s  (daemon %s:%s, %dx%d, client_id=%s)"

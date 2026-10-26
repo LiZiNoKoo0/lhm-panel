@@ -34,6 +34,14 @@ let atlas = null;
 let latest = null;
 let activePage = 'overview';
 let history = {};
+
+//: Why the key could not be kept, in words the operator can act on. Declared
+//: here, with the rest of the top-level state, because boot() at the bottom of
+//: this file calls pairedKey() -- a `let` declared down in the pairing section
+//: would still be in its temporal dead zone at that moment, and the page died
+//: with "Cannot access 'keyStoreError' before initialization" before issuing a
+//: single request.
+let keyStoreError = '';
 let searchTerm = '';
 
 const el = (id) => document.getElementById(id);
@@ -847,6 +855,20 @@ async function boot() {
 }
 
 boot().catch((err) => {
+  // This catch is why the white page stayed unexplained: a throw inside boot()
+  // becomes a rejected promise here, so no 'error' event fires and nothing
+  // reached the server. Report it before deciding what to paint.
+  if (window.pcmonReport) {
+    window.pcmonReport({
+      kind: 'boot',
+      msg: String((err && err.message) || err),
+      stack: String((err && err.stack) || '').slice(0, 600),
+    });
+  }
+  // "unpaired" already put the pairing overlay on screen. Painting 启动失败 on top
+  // of it reads as a second, unrelated fault -- which is exactly how a pairing
+  // problem got mistaken for a broken page.
+  if (String((err && err.message) || err) === 'unpaired') return;
   const badge = el('badge');
   badge.className = 'pill pill-down';
   badge.textContent = '启动失败';
@@ -862,17 +884,52 @@ const KEY_STORE = 'pcmon.key';
 
 function pairedKey() {
   try {
-    return localStorage.getItem(KEY_STORE) || '';
+    const kept = localStorage.getItem(KEY_STORE);
+    if (kept) return kept;
   } catch (err) {
-    return '';           // private mode: pairing will not survive a reload
+    keyStoreError = 'localStorage: ' + (err && err.message ? err.message : err);
   }
+  try {
+    return sessionStorage.getItem(KEY_STORE) || '';
+  } catch (err) {
+    keyStoreError += '; sessionStorage: ' +
+      (err && err.message ? err.message : err);
+  }
+  return '';
 }
 
+/** Store the key and prove it stuck. Returns true only after a read-back. */
 function storeKey(value) {
+  keyStoreError = '';
+  if (!value) {
+    try { localStorage.removeItem(KEY_STORE); } catch (err) { /* ignore */ }
+    try { sessionStorage.removeItem(KEY_STORE); } catch (err) { /* ignore */ }
+    return true;
+  }
+  // The checkbox failure this replaces: the write was wrapped in a bare catch,
+  // so a browser that refuses site data looked exactly like a successful pairing
+  // -- until the reload, where the overlay came straight back.
   try {
-    if (value) localStorage.setItem(KEY_STORE, value);
-    else localStorage.removeItem(KEY_STORE);
-  } catch (err) { /* ignore: the page still works until it reloads */ }
+    localStorage.setItem(KEY_STORE, value);
+    if (localStorage.getItem(KEY_STORE) === value) return true;
+    keyStoreError = 'localStorage write did not stick';
+  } catch (err) {
+    keyStoreError = 'localStorage: ' + (err && err.message ? err.message : err);
+  }
+  // sessionStorage dies with the tab, but it survives the reload that follows
+  // pairing -- which is what makes a browser with site data blocked usable.
+  try {
+    sessionStorage.setItem(KEY_STORE, value);
+    if (sessionStorage.getItem(KEY_STORE) === value) {
+      keyStoreError += ' (fell back to sessionStorage)';
+      return true;
+    }
+    keyStoreError += '; sessionStorage write did not stick';
+  } catch (err) {
+    keyStoreError += '; sessionStorage: ' +
+      (err && err.message ? err.message : err);
+  }
+  return false;
 }
 
 function authHeaders(extra) {
@@ -946,7 +1003,13 @@ async function claimWithCode(code) {
     }),
   });
   if (!claimResp.ok) throw new Error('配对码不对，或者已经过期');
-  storeKey(await keyPromise);        // the same bytes the server just derived
+  // The key has to be on this side before the reload. Reloading with nothing
+  // stored just shows the overlay again, which reads as "pairing failed" when
+  // in fact the claim succeeded -- so refuse to reload and say why.
+  if (!storeKey(await keyPromise)) {
+    throw new Error('配对已通过，但这个浏览器不让网页保存数据（' +
+                    keyStoreError + '）。请在浏览器设置里允许本站保存数据后重试。');
+  }
   hidePairing();
   window.location.reload();          // reopen every stream with the key in place
 }

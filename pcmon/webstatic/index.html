@@ -5,6 +5,35 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PC-Monitor · 上位机仪表盘</title>
 <link rel="stylesheet" href="/tokens.css">
+<script>
+// TEMPORARY: report startup failures to the server. A white page with no API
+// request is invisible from the server side; this turns it into a log line.
+(function () {
+  function report(payload) {
+    try {
+      fetch('/debug/client-error', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+    } catch (err) { /* nothing left to try */ }
+  }
+  window.addEventListener('error', function (e) {
+    report({kind: 'error', msg: String(e.message),
+            src: e.filename, line: e.lineno, col: e.colno});
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    report({kind: 'unhandledrejection',
+            msg: String((r && r.message) || r),
+            stack: String((r && r.stack) || '').slice(0, 400)});
+  });
+  // boot() awaits in app.js, so its failures arrive as a rejected promise that a
+  // .catch() handles -- which means no 'error' event ever fires. Export the hook
+  // so that catch can report the reason instead of swallowing it.
+  window.pcmonReport = report;
+})();
+</script>
 </head>
 <body class="bg-[#f9fafb] text-[#111827] font-sans">
 <div class="flex h-screen overflow-hidden">
