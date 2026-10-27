@@ -54,3 +54,6 @@ tls/
 *.key
 *.pem
 _captured.ndjson
+
+# plugin config may hold an API key
+plugins/weather.json

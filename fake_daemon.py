@@ -57,6 +57,7 @@ from pathlib import Path
 
 from pcmon import layouts
 from pcmon import lhm
+from pcmon import plugins
 from pcmon import protocol
 from pcmon import sources
 from pcmon.devices import DeviceTable
@@ -156,6 +157,22 @@ METRICS = [
     {"id": "net.down", "label": "NET", "unit": "KB/s", "type": "number",
      "min": 0, "max": 8000, "interval_ms": 1000},
 ]
+
+def with_groups(metrics):
+    """Stamp the PC-side `group` on catalog entries that do not carry one.
+
+    Grouping is a dashboard concern (weather cards vs resource cards). A terminal
+    draws nodes and must never branch on it, so this never changes a frame that
+    a board cares about -- it is one field the page may read and ignore.
+    """
+    out = []
+    for entry in metrics:
+        item = dict(entry)
+        if not item.get("group"):
+            item["group"] = "system"
+        out.append(item)
+    return out
+
 
 #: Page list. The daemon owns it; terminals only know "which index" (s.10).
 SCENE_TITLES = ["CPU", "MEMNET", "KEYS"]
@@ -610,7 +627,7 @@ class Daemon:
                  record_path=None, lenient=False, seed=None,
                  source=SOURCE_FAKE, bridge_path=DEFAULT_BRIDGE_PATH,
                  layout_file=DEFAULT_LAYOUT_FILE, auth_mode=AUTH_MODE_DEFAULT,
-                 devices_file=DEVICES_FILE):
+                 devices_file=DEVICES_FILE, plugin_port=0):
         self.host = host
         self.port = port
         self.token = token or secrets.token_hex(TOKEN_BYTES)
@@ -637,6 +654,17 @@ class Daemon:
         self.source_kind = source if source in SOURCES else SOURCE_FAKE
         self.bridge_path = bridge_path
         self._source = self._make_source(self.source_kind, bridge_path, seed)
+        # Plugins (PROTOCOL.md s.1, TCP 7801) are opt-in: a daemon that opens an
+        # extra port unasked is a surprise, not a feature. The hub is just
+        # another source, so the daemon still holds exactly one.
+        self.plugin_port = int(plugin_port or 0)
+        self._hub = None
+        if self.plugin_port:
+            self._hub = plugins.PluginHub(port=self.plugin_port, log=self.log)
+            extra = None if sources.has_metrics(self._source) else list(METRICS)
+            self._source = sources.CompositeSource(self._source, self._hub,
+                                                   extra_metrics=extra,
+                                                   log=self.log)
         self._catalog_ids = None      # lhm: metric ids published last
         self._catalog_metrics = []    # lhm: catalog entries for those ids
         self._catalog_ver = CATALOG_VER
@@ -833,8 +861,8 @@ class Daemon:
         if sources.has_metrics(self._source):
             self.refresh_catalog()
             with self._catalog_lock:
-                return self._catalog_ver, list(self._catalog_metrics)
-        return CATALOG_VER, METRICS
+                return self._catalog_ver, with_groups(self._catalog_metrics)
+        return CATALOG_VER, with_groups(METRICS)
 
     def _sync_catalog(self):
         """Push a fresh catalog to everyone when the metric set changed (s.6)."""
@@ -1646,6 +1674,10 @@ def parse_args(argv=None):
                        help="value source: fake (invented numbers, default), lhm "
                             "(LibreHardwareMonitor via lhm_bridge.exe, Windows) or "
                             "proc (/proc + /sys, Linux)")
+    parser.add_argument("--plugin-port", type=int, default=0,
+                       help="accept plugins on this TCP port (default 0 = off); "
+                            "plugins may contribute metrics and values, see "
+                            "pcmon/plugins.py and plugins/weather.py")
     parser.add_argument("--bridge", metavar="PATH", default=DEFAULT_BRIDGE_PATH,
                        help="lhm bridge executable (default %s); ignored by --source fake"
                             % DEFAULT_BRIDGE_PATH)
@@ -1690,7 +1722,8 @@ def main(argv=None):
                     record_path=args.record, lenient=args.lenient, seed=args.seed,
                     source=args.source, bridge_path=args.bridge,
                     layout_file=args.layouts, auth_mode=args.auth,
-                    devices_file=args.devices)
+                    devices_file=args.devices,
+                    plugin_port=args.plugin_port)
     daemon.banner()
     # Only the static path needs a token on disk, and only because term_tk.py
     # looks for it there. In hmac mode writing it would leave a plain secret in

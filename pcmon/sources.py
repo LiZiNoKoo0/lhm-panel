@@ -359,7 +359,12 @@ class ProcSource(Source):
         return entries
 
     def _entry(self, metric_id, label, unit, low, high):
-        """One catalog entry (PROTOCOL.md s.6) -- the same shape lhm produces."""
+        """One catalog entry (PROTOCOL.md s.6) -- the same shape lhm produces.
+
+        `group` is PC-side only: it says which part of a dashboard a metric
+        belongs to (system resources vs a weather plugin). Terminals never see
+        it, because a terminal draws nodes, not categories.
+        """
         return {
             "id": metric_id,
             "label": label,
@@ -368,7 +373,126 @@ class ProcSource(Source):
             "min": low,
             "max": high,
             "interval_ms": self.interval_ms,
+            "group": "system",
         }
+
+
+class CompositeSource(Source):
+    """Several sources presented as one (the daemon holds this, not a list).
+
+    WHY IT EXISTS
+        C6 gave every source the same five methods, and a plugin hub is just
+        another source on the far side of a socket. Composing them here is what
+        keeps the daemon from growing a second code path for "data that comes
+        from somewhere else".
+
+    WHO WINS A CLASH
+        Later sources win, and the clash is counted. A plugin that publishes
+        `cpu.total` is either replacing a broken sensor or making a mistake;
+        either way the operator can see `conflicts` in --stats rather than
+        discovering a silently ignored metric.
+
+    `extra_metrics` IS NOT A HACK
+        A source with a fixed table (fake) cannot name its metrics -- the daemon
+        owns that list. Passing it in here means metrics() can still answer the
+        whole truth instead of dropping the built-in four.
+    """
+
+    name = "composite"
+
+    def __init__(self, *sources_, extra_metrics=None, log=None):
+        super().__init__()
+        self._sources = [item for item in sources_ if item is not None]
+        self._extra = list(extra_metrics or [])
+        self._log = log if callable(log) else None
+        self.conflicts = 0
+
+    def _note(self, text):
+        if self._log is None:
+            return
+        try:
+            self._log(text)
+        except Exception:      # noqa: BLE001 - logging must never hurt
+            self.stats["log_errors"] += 1
+
+    def start(self):
+        started = False
+        for source in self._sources:
+            try:
+                started = source.start() or started
+            except Exception as exc:   # noqa: BLE001
+                self._note("source start failed: %s: %s"
+                           % (type(exc).__name__, exc))
+        return started
+
+    def stop(self):
+        for source in self._sources:
+            try:
+                source.stop()
+            except Exception as exc:   # noqa: BLE001
+                self._note("source stop failed: %s: %s"
+                           % (type(exc).__name__, exc))
+        return True
+
+    def tick(self, now):
+        for source in self._sources:
+            tick = getattr(source, "tick", None)
+            if callable(tick):
+                try:
+                    tick(now)
+                except Exception as exc:   # noqa: BLE001
+                    self._note("source tick failed: %s: %s"
+                               % (type(exc).__name__, exc))
+
+    def snapshot(self, now=None):
+        """Union of every source. A None from one source does not erase a value
+        another source reported for the same id in this round."""
+        merged = {}
+        for source in self._sources:
+            try:
+                part = snapshot_of(source, now)
+            except Exception as exc:       # noqa: BLE001
+                self._note("source snapshot failed: %s: %s"
+                           % (type(exc).__name__, exc))
+                continue
+            if not isinstance(part, dict):
+                continue
+            for metric_id, value in part.items():
+                previous = merged.get(metric_id)
+                if (previous is not None and value is not None
+                        and previous != value):
+                    self.conflicts += 1
+                if value is None and previous is not None:
+                    continue          # keep the fresher answer from this round
+                merged[metric_id] = value
+        self.stats["snapshots"] += 1
+        return merged
+
+    def metrics(self):
+        """extra_metrics first, then every source that can name its own."""
+        seen = {}
+        ordered = []
+        for entry in self._extra:
+            metric_id = entry.get("id") if isinstance(entry, dict) else None
+            if metric_id and metric_id not in seen:
+                seen[metric_id] = True
+                ordered.append(dict(entry))
+        for source in self._sources:
+            if not has_metrics(source):
+                continue
+            try:
+                part = source.metrics()
+            except Exception as exc:       # noqa: BLE001
+                self._note("source metrics failed: %s: %s"
+                           % (type(exc).__name__, exc))
+                continue
+            for entry in part or []:
+                metric_id = entry.get("id") if isinstance(entry, dict) else None
+                if not metric_id or metric_id in seen:
+                    continue
+                seen[metric_id] = True
+                ordered.append(dict(entry))
+        return ordered
 
 
 #: name -> factory. Only what this file can build; the daemon registers its own
