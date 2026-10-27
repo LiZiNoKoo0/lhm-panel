@@ -782,3 +782,22 @@ Two real bugs fixed (see `806b87b`):
 Operating note: the dashboard must use the `webui` key from `devices.json`. Any other token makes
 the daemon log `AUTH timeout` every 5 s, because the dashboard refuses a daemon whose `srv` it
 cannot verify. Acceptance: `AUTH ok` + `hello from webui` + `REQ /api/font -> 200` + moving numbers.
+#### 插件层（TCP 7801）：天气插件跑通（2026-10-27）
+
+| 件 | 内容 |
+|---|---|
+| `pcmon/plugins.py` | `PluginHub`：监听 127.0.0.1:7801，每插件一线程，实现 C6 的同一套契约（start/stop/snapshot/metrics） |
+| `plugins/weather.py` | 读配置（url / city / apikey / map）→ 拉 HTTP → 按点路径取值 → 推值；`--once` 可干跑 |
+| `pcmon/sources.py` | `CompositeSource`（多源合一，冲突计数）+ catalog 的 `group` 字段 |
+| `fake_daemon.py` | `--plugin-port 7801`（默认关）；catalog 统一补 `group`（缺省 `system`） |
+| `tools/check_plugins.py` | 17 项：hello 应答、值进 snapshot、3 个周期无值变 `None`、插件退出仍留 catalog、垃圾行不致命、未握手发值直接断连、canned 响应映射 |
+
+实测（当天）：Open-Meteo 杭州 18.4C / 81% / 2.75m/s；daemon 一次广播 **9 个指标**
+（`cpu.total,cpu.temp,mem.used,net.down,gpu.load,gpu.temp` + `weather.temp,weather.humidity,weather.wind`）。
+
+配置可能含 API key ⇒ `plugins/weather.json` 已进 `.gitignore`，仓库里只有 `weather.sample.json`。
+
+**还没做**：页面上的分区显示（指标表分节 / KPI 卡片分区）——`group` 已在 catalog 里，UI 尚未使用。
+
+**关机时的现场**：PC 上 daemon（`--source lhm --plugin-port 7801`）、仪表盘（webui + 设备 key）、
+天气插件三个进程随关机停止；板子 `192.168.1.53` 会断连。下次起来先跑 `tools\run_suite.py` 确认基线。
