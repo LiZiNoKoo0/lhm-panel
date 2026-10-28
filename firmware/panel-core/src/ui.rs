@@ -109,6 +109,28 @@ pub enum Kind {
 /// unreadable, matching what it_nodes does on the PC side.
 pub const FONT_SIZES: [u8; 3] = [16, 32, 48];
 
+/// One selectable item, as geometry only (T6d).
+///
+/// The table exists so the highlight does not have to re-scan the node list on
+/// every key press, and so an explicit `focus` index from the daemon means what
+/// the daemon thinks it means. Slot `i` of `Layout::focus` IS wire index `i`:
+/// there is no 0-based/1-based conversion anywhere in this file.
+#[derive(Clone, Copy)]
+pub struct FocusItem {
+    pub x: i16,
+    pub y: i16,
+    pub w: u16,
+    pub h: u16,
+}
+
+impl FocusItem {
+    pub(crate) const EMPTY: FocusItem = FocusItem { x: 0, y: 0, w: 0, h: 0 };
+}
+
+/// Highest focus index the wire allows (one slot per node).
+pub const MAX_FOCUS: usize = MAX_NODES;
+
+
 /// One node, in drawing order.
 #[derive(Clone, Copy)]
 pub struct Node {
@@ -313,6 +335,12 @@ pub struct Layout {
     pub bg: u16,
     nodes: [Node; MAX_NODES],
     len: u8,
+    /// T6d: slot i is focus index i (1-based, as the wire numbers them).
+    focus: [FocusItem; MAX_FOCUS + 1],
+    /// Bit (i-1) set == slot i holds an item. A bitmask rather than a sentinel
+    /// inside FocusItem, because a legal focusable rect may be 0x0.
+    focus_used: u32,
+    focus_len: u8,
 }
 
 impl Layout {
@@ -335,8 +363,12 @@ impl Layout {
             bg,
             nodes: [Node::EMPTY; MAX_NODES],
             len: nodes.len() as u8,
+            focus: [FocusItem::EMPTY; MAX_FOCUS + 1],
+            focus_used: 0,
+            focus_len: 0,
         };
         layout.nodes[..nodes.len()].copy_from_slice(nodes);
+        layout.rebuild_focus();
         Some(layout)
     }
 
@@ -399,6 +431,9 @@ impl Layout {
             bg,
             nodes: [Node::EMPTY; MAX_NODES],
             len: 0,
+            focus: [FocusItem::EMPTY; MAX_FOCUS + 1],
+            focus_used: 0,
+            focus_len: 0,
         };
         for item in array {
             if layout.len as usize == MAX_NODES {
@@ -408,7 +443,100 @@ impl Layout {
             layout.nodes[layout.len as usize] = node;
             layout.len += 1;
         }
+        layout.rebuild_focus();
         Ok(layout)
+    }
+
+    /// Rebuild the focus table from the nodes (T6d).
+    ///
+    /// Two passes, and the order matters: an explicit `focus` index is a promise
+    /// from the daemon about which number a button answers to, so it is placed
+    /// first and never moved. Anything without one (or whose index was already
+    /// taken) fills the lowest free slot in draw order -- which is exactly the
+    /// old behaviour for pages that never set `focus` at all.
+    fn rebuild_focus(&mut self) {
+        self.focus = [FocusItem::EMPTY; MAX_FOCUS + 1];
+        self.focus_used = 0;
+        self.focus_len = 0;
+        let count = self.len as usize;
+        let mut placed = [false; MAX_NODES];
+
+        for i in 0..count {
+            let node = self.nodes[i];
+            if !node.focusable {
+                continue;
+            }
+            let index = node.focus as usize;
+            if index == 0 || index > MAX_FOCUS {
+                continue;
+            }
+            if self.focus_used & (1 << (index - 1)) != 0 {
+                continue;
+            }
+            self.put_focus(index, node);
+            placed[i] = true;
+        }
+        for i in 0..count {
+            if placed[i] || !self.nodes[i].focusable {
+                continue;
+            }
+            let mut index = 1;
+            while index <= MAX_FOCUS && self.focus_used & (1 << (index - 1)) != 0 {
+                index += 1;
+            }
+            if index > MAX_FOCUS {
+                break;
+            }
+            self.put_focus(index, self.nodes[i]);
+        }
+    }
+
+    fn put_focus(&mut self, index: usize, node: Node) {
+        if index == 0 || index > MAX_FOCUS {
+            return;
+        }
+        self.focus[index] = FocusItem { x: node.x, y: node.y, w: node.w, h: node.h };
+        self.focus_used |= 1 << (index - 1);
+        self.focus_len += 1;
+    }
+
+    /// How many selectable items this page has.
+    pub fn focus_len(&self) -> u8 {
+        self.focus_len
+    }
+
+    /// The wire index of the k-th selectable item (`k` is 1-based).
+    ///
+    /// Indices may be sparse when the daemon numbered them explicitly, so the
+    /// k-th item is not necessarily index k.
+    pub fn focus_index_at(&self, k: u8) -> Option<u8> {
+        if k == 0 || k > self.focus_len {
+            return None;
+        }
+        let mut seen = 0u8;
+        for index in 1..=MAX_FOCUS {
+            if self.focus_used & (1 << (index - 1)) == 0 {
+                continue;
+            }
+            seen += 1;
+            if seen == k {
+                return Some(index as u8);
+            }
+        }
+        None
+    }
+
+    /// Geometry of one wire index, or None when nothing is numbered that way.
+    pub fn focus_rect_at(&self, index: u8) -> Option<(i16, i16, u16, u16)> {
+        let i = index as usize;
+        if i == 0 || i > MAX_FOCUS {
+            return None;
+        }
+        if self.focus_used & (1 << (i - 1)) == 0 {
+            return None;
+        }
+        let item = self.focus[i];
+        Some((item.x, item.y, item.w, item.h))
     }
 
     /// Draw the page onto a canvas.
@@ -967,10 +1095,7 @@ impl Page {
 
     /// How many nodes on this page can be selected.
     pub fn focus_count(&self) -> u8 {
-        self.layout
-            .as_ref()
-            .map(|l| l.nodes().iter().filter(|n| n.focusable).count() as u8)
-            .unwrap_or(0)
+        self.layout.as_ref().map(|l| l.focus_len()).unwrap_or(0)
     }
 
     /// The 1-based focus position, clamped to the current page.
@@ -1020,12 +1145,8 @@ impl Page {
             return None;
         }
         let layout = self.layout.as_ref()?;
-        layout
-            .nodes()
-            .iter()
-            .filter(|n| n.focusable)
-            .nth(position as usize - 1)
-            .map(|n| (n.x, n.y, n.w, n.h))
+        let index = layout.focus_index_at(position)?;
+        layout.focus_rect_at(index)
     }
 
     /// Take one protocol line. This is the only way the page changes.
